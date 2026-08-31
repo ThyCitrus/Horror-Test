@@ -11,22 +11,28 @@ PANEL_DIVIDER = (80, 80, 80)
 ENABLE_MOUSE_NAVIGATION = True
 
 COLOR_PALETTE = [
-    (220, 60, 60),
-    (255, 140, 0),
-    (230, 210, 80),
-    (140, 220, 60),
-    (60, 200, 100),
-    (60, 220, 220),
-    (80, 200, 255),
-    (100, 100, 255),
-    (160, 60, 220),
-    (220, 80, 160),
-    (255, 90, 200),
-    (200, 130, 60),
-    (255, 255, 255),
-    (200, 200, 200),
-    (150, 90, 220),
-    (90, 160, 90),
+    # Reds / oranges
+    (220, 60, 60),  # strong red (keep)
+    (255, 140, 0),  # orange (keep)
+    (230, 210, 80),  # yellow (keep)
+    # Greens – push one more teal, one more leaf-green
+    (140, 220, 60),  # lime-green (keep)
+    (40, 180, 120),  # deeper teal-green (changed from 60,200,100)
+    # Cyans / blues – separate cyan from sky-blue
+    (40, 210, 210),  # clearer cyan (slightly tweaked from 60,220,220)
+    (60, 160, 255),  # sky-blue (changed from 80,200,255)
+    (80, 80, 240),  # deeper blue (changed from 100,100,255)
+    # Purples / magentas – make them more distinct
+    (170, 60, 230),  # vivid purple (slightly tweaked from 160,60,220)
+    (220, 70, 150),  # rose-pink (changed from 220,80,160)
+    (255, 80, 190),  # hot pink (changed from 255,90,200)
+    # Browns / neutrals
+    (200, 130, 60),  # brown/orange (keep)
+    (255, 255, 255),  # white (keep)
+    (180, 180, 180),  # lighter gray (slightly brighter than 200,200,200)
+    # Extra purple and green – push them away from existing ones
+    (100, 70, 210),  # indigo (changed from 150,90,220)
+    (70, 140, 70),  # darker forest green (changed from 90,160,90)
 ]
 COLOR_GRID_COLS = 4
 
@@ -107,7 +113,9 @@ class TerminalUI:
         self.state = "DELETE_SELECT"
         slots = [s for s in list_slots() if s["filled"]]
         if not slots:
-            self.add_log("No saves available to delete.", (255, 80, 80))
+            self.set_transient(
+                "No saves available to delete.", (255, 80, 80), duration_ms=1500
+            )
             self.load_slot_menu()
             return
 
@@ -156,7 +164,9 @@ class TerminalUI:
                         self.state = "CONFIRM_NAME"
                         self.set_options(["Confirm", "Rename"])
                     else:
-                        self.add_log("Name cannot be empty!", (255, 80, 80))
+                        self.set_transient(
+                            "Name cannot be empty!", (255, 80, 80), duration_ms=1500
+                        )
                 elif event.key == pygame.K_BACKSPACE:
                     self.creation_name = self.creation_name[:-1]
                 elif event.unicode.isprintable() and len(self.creation_name) < 16:
@@ -273,7 +283,7 @@ class TerminalUI:
             else:
                 target = filled[sel]
                 delete_slot(target["slot"])
-                self.add_log(
+                self.set_transient(
                     f"Slot {target['slot']} deleted.", (255, 100, 100), duration_ms=1500
                 )
                 self.load_slot_menu()
