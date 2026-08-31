@@ -3,7 +3,7 @@ import random
 
 WALL = "#"
 FLOOR = "."
-STAIRS = ">"
+LADDER = "‡"
 
 DIRECTIONS = {
     "N": (0, -1),
@@ -553,11 +553,11 @@ def generate_dungeon(max_structures=15, seed=None):
     # PASS 3: Enclose exposed outer floor edges
     enclose_dungeon_walls(tiles)
 
-    place_stairs(tiles, last_info)
+    place_ladders(tiles, last_info)
     return tiles
 
 
-def place_stairs(tiles, info):
+def place_ladders(tiles, info):
     if not info:
         return
 
@@ -582,7 +582,7 @@ def place_stairs(tiles, info):
 
     # If the exact center is floor, use it
     if tiles.get((cx, cy)) == FLOOR:
-        tiles[(cx, cy)] = STAIRS
+        tiles[(cx, cy)] = LADDER
         return
 
     # Otherwise, search in expanding squares until we hit a floor tile
@@ -594,7 +594,7 @@ def place_stairs(tiles, info):
                     continue  # only the perimeter of the square
                 x, y = cx + dx, cy + dy
                 if tiles.get((x, y)) == FLOOR:
-                    tiles[(x, y)] = STAIRS
+                    tiles[(x, y)] = LADDER
                     return
 
 
