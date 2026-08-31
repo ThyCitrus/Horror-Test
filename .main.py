@@ -52,7 +52,7 @@ def main():
     pause_font = pygame.font.SysFont(FONT_NAME, 48, bold=True)
 
     active_seed = seed_rng.randint(0, 999999)
-    dungeon = generate_dungeon(max_structures=15, seed=active_seed)
+    dungeon = generate_dungeon(max_structures=60, seed=active_seed)
     floor_tiles = [pos for pos, char in dungeon.items() if char == FLOOR]
     player_x, player_y = floor_tiles[0] if floor_tiles else (0, 0)
     player_color = (80, 200, 255)
@@ -69,13 +69,13 @@ def main():
         if slot_info["filled"]:
             char_data = load_json(slot_info["path"])
             active_seed = char_data.get("seed", seed_rng.randint(0, 999999))
-            dungeon = generate_dungeon(max_structures=15, seed=active_seed)
+            dungeon = generate_dungeon(max_structures=60, seed=active_seed)
             player_x = char_data.get("player_x", floor_tiles[0][0])
             player_y = char_data.get("player_y", floor_tiles[0][1])
             player_color = tuple(map(int, char_data["color"].split()))
         else:
             active_seed = seed_rng.randint(0, 999999)
-            dungeon = generate_dungeon(max_structures=15, seed=active_seed)
+            dungeon = generate_dungeon(max_structures=60, seed=active_seed)
             preview_floors = [pos for pos, char in dungeon.items() if char == FLOOR]
             player_x, player_y = preview_floors[0] if preview_floors else (0, 0)
             player_color = (120, 120, 120)

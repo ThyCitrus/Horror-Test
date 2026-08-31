@@ -726,6 +726,6 @@ def print_dungeon(tiles):
 
 if __name__ == "__main__":
     seed = random.randint(0, 2**32 - 1)
-    dungeon = generate_dungeon(max_structures=15, seed=seed)
+    dungeon = generate_dungeon(max_structures=60, seed=seed)
     print(f"Seed: {seed}")
     print_dungeon(dungeon)
