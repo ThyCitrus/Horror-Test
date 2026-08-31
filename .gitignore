@@ -8,3 +8,6 @@ __pycache__/
 
 # Save files (if you don't want them in the repo)
 saves/
+
+# Test files
+*test*
