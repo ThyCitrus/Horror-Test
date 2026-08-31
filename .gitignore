@@ -11,3 +11,5 @@ saves/
 
 # Test files
 *test*
+test_*/
+*_test/
