@@ -1,8 +1,6 @@
 import sys
-import random
 import pygame
 
-from classes import CLASSES, compute_stats
 from save_utils import list_slots, load_json, save_json, slot_path, delete_slot
 
 TEXT_WHITE = (230, 230, 230)
@@ -11,6 +9,26 @@ PANEL_BG = (15, 15, 15)
 PANEL_DIVIDER = (80, 80, 80)
 
 ENABLE_MOUSE_NAVIGATION = True
+
+COLOR_PALETTE = [
+    (220, 60, 60),
+    (255, 140, 0),
+    (230, 210, 80),
+    (140, 220, 60),
+    (60, 200, 100),
+    (60, 220, 220),
+    (80, 200, 255),
+    (100, 100, 255),
+    (160, 60, 220),
+    (220, 80, 160),
+    (255, 90, 200),
+    (200, 130, 60),
+    (255, 255, 255),
+    (200, 200, 200),
+    (150, 90, 220),
+    (90, 160, 90),
+]
+COLOR_GRID_COLS = 4
 
 
 # --- Virtual Terminal UI ---
@@ -38,6 +56,11 @@ class TerminalUI:
         self.creation_name = ""
         self.creation_color = "255 255 255"
         self.active_character = None
+
+        self.color_grid_index = 0
+        self.color_grid_cols = COLOR_GRID_COLS
+        self.color_rects = []
+        self._sync_color_from_index()
 
         self.load_start_menu()
 
@@ -69,9 +92,7 @@ class TerminalUI:
 
         for s in slots:
             if s["filled"]:
-                labels.append(
-                    f"Slot {s['slot']} — {s['name']} | {s['class'].title()} | Lv.{s['level']}"
-                )
+                labels.append(f"Slot {s['slot']} — {s['name']} | Lv.{s['level']}")
                 r, g, b = map(int, s["color"].split())
                 colors.append((r, g, b))
             else:
@@ -94,6 +115,38 @@ class TerminalUI:
         colors = [tuple(map(int, s["color"].split())) for s in slots] + [TEXT_WHITE]
         self.set_options(labels, colors)
 
+    def _move_color_selection(self, dcol, drow):
+        rows = len(COLOR_PALETTE) // self.color_grid_cols
+        row = self.color_grid_index // self.color_grid_cols
+        col = self.color_grid_index % self.color_grid_cols
+        col = (col + dcol) % self.color_grid_cols
+        row = (row + drow) % rows
+        self.color_grid_index = row * self.color_grid_cols + col
+        self._sync_color_from_index()
+
+    def _sync_color_from_index(self):
+        r, g, b = COLOR_PALETTE[self.color_grid_index]
+        self.creation_color = f"{r} {g} {b}"
+
+    def confirm_color_selection(self):
+        current_seed, current_pos = self.on_slot_hover_callback(None, get_current=True)
+        character = {
+            "slot": self.creation_slot,
+            "name": self.creation_name,
+            "color": self.creation_color,
+            "seed": current_seed,
+            "player_x": current_pos[0],
+            "player_y": current_pos[1],
+            "level": 1,
+            "hp": 100,
+            "max_hp": 100,
+            "gold": 0,
+            "items": [],
+        }
+        save_json(character, slot_path(self.creation_slot))
+        self.active_character = character
+        self.enter_playing_state(f"Character {character['name']} created!")
+
     def handle_input(self, event):
         # 1. Isolating Text Input Phase
         if self.state == "NAME_INPUT":
@@ -110,7 +163,39 @@ class TerminalUI:
                     self.creation_name += event.unicode
             return
 
-        # 2. General Key Navigation
+        # 2. Color grid has its own nav — separate from the vertical option list
+        if self.state == "COLOR_SELECT":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_LEFT:
+                    self._move_color_selection(-1, 0)
+                elif event.key == pygame.K_RIGHT:
+                    self._move_color_selection(1, 0)
+                elif event.key == pygame.K_UP:
+                    self._move_color_selection(0, -1)
+                elif event.key == pygame.K_DOWN:
+                    self._move_color_selection(0, 1)
+                elif event.key == pygame.K_RETURN:
+                    self.confirm_color_selection()
+            elif ENABLE_MOUSE_NAVIGATION and event.type == pygame.MOUSEMOTION:
+                mx, my = event.pos
+                for i, rect in enumerate(self.color_rects):
+                    if rect.collidepoint(mx, my):
+                        self.color_grid_index = i
+                        self._sync_color_from_index()
+            elif (
+                ENABLE_MOUSE_NAVIGATION
+                and event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1
+            ):
+                mx, my = event.pos
+                for i, rect in enumerate(self.color_rects):
+                    if rect.collidepoint(mx, my):
+                        self.color_grid_index = i
+                        self._sync_color_from_index()
+                        self.confirm_color_selection()
+            return
+
+        # 3. General Key Navigation
         if event.type == pygame.KEYDOWN:
             if (
                 self.state in ("PLAYING", "INVENTORY", "MAP")
@@ -131,7 +216,7 @@ class TerminalUI:
             elif event.key == pygame.K_RETURN:
                 self.execute_selection()
 
-        # 3. Mouse Navigation
+        # 4. Mouse Navigation
         elif ENABLE_MOUSE_NAVIGATION and event.type == pygame.MOUSEMOTION:
             mx, my = event.pos
             for i, rect in enumerate(self.option_rects):
@@ -186,6 +271,7 @@ class TerminalUI:
                 delete_slot(target["slot"])
                 self.add_log(f"Slot {target['slot']} deleted.", (255, 100, 100))
                 self.load_slot_menu()
+
         elif self.state == "PLAYING":
             if sel == 0:
                 self.state = "INVENTORY"
@@ -202,65 +288,13 @@ class TerminalUI:
 
         elif self.state == "CONFIRM_NAME":
             if sel == 0:
-                r, g, b = (
-                    random.randint(50, 255),
-                    random.randint(50, 255),
-                    random.randint(50, 255),
-                )
-                self.creation_color = f"{r} {g} {b}"
+                self.color_grid_index = 0
+                self._sync_color_from_index()
                 self.state = "COLOR_SELECT"
-                self.set_options(["Confirm Color", "Reroll Color"])
+                self.set_options([])
             else:
                 self.creation_name = ""
                 self.state = "NAME_INPUT"
-
-        elif self.state == "COLOR_SELECT":
-            if sel == 0:
-                self.state = "CLASS_SELECT"
-                keys = list(CLASSES.keys())
-                labels = [f"{CLASSES[k].name} — {CLASSES[k].description}" for k in keys]
-                colors = [CLASSES[k].color for k in keys]
-                self.set_options(labels, colors)
-            else:
-                r, g, b = (
-                    random.randint(50, 255),
-                    random.randint(50, 255),
-                    random.randint(50, 255),
-                )
-                self.creation_color = f"{r} {g} {b}"
-
-        elif self.state == "CLASS_SELECT":
-            keys = list(CLASSES.keys())
-            chosen_key = keys[sel]
-            base = compute_stats(CLASSES[chosen_key])
-
-            current_seed, current_pos = self.on_slot_hover_callback(
-                None, get_current=True
-            )
-
-            character = {
-                "slot": self.creation_slot,
-                "name": self.creation_name,
-                "color": self.creation_color,
-                "class": chosen_key,
-                "seed": current_seed,
-                "player_x": current_pos[0],
-                "player_y": current_pos[1],
-                "level": 1,
-                "xp": 0,
-                "stats": {"str": base["str"], "dex": base["dex"], "int": base["int"]},
-                "hp": base["max_health"],
-                "max_hp": base["max_health"],
-                "mana": base["max_mana"],
-                "max_mana": base["max_mana"],
-                "stamina": base["max_stamina"],
-                "max_stamina": base["max_stamina"],
-                "gold": 0,
-                "items": [],
-            }
-            save_json(character, slot_path(self.creation_slot))
-            self.active_character = character
-            self.enter_playing_state(f"Character {character['name']} created!")
 
     def render(self, surface, rect, dungeon=None, discovered=None, player_pos=None):
         pygame.draw.rect(surface, PANEL_BG, rect)
@@ -291,15 +325,47 @@ class TerminalUI:
             )
             surface.blit(prompt, (rect.x + 20, y))
 
-        elif self.state == "COLOR_SELECT":
-            r, g, b = map(int, self.creation_color.split())
-            c_lbl = self.font.render(
-                f"Color: [{self.creation_color}] ", True, (r, g, b)
+        elif self.state == "CONFIRM_NAME":
+            name_lbl = self.font.render(
+                f"Name: {self.creation_name}", True, (80, 200, 255)
             )
-            surface.blit(c_lbl, (rect.x + 20, y))
+            surface.blit(name_lbl, (rect.x + 20, y))
+            y += line_height + 5
 
-            marker_preview = self.bold_font.render(" (Marker: v)", True, (r, g, b))
-            surface.blit(marker_preview, (rect.x + 20 + c_lbl.get_width(), y))
+        elif self.state == "COLOR_SELECT":
+            hint_lbl = self.font.render(
+                f"Choose a color, {self.creation_name}:", True, TEXT_WHITE
+            )
+            surface.blit(hint_lbl, (rect.x + 20, y))
+            y += line_height + 10
+
+            swatch_size = 32
+            gap = 8
+            self.color_rects.clear()
+            for i, (r, g, b) in enumerate(COLOR_PALETTE):
+                col = i % self.color_grid_cols
+                row = i // self.color_grid_cols
+                sx = rect.x + 20 + col * (swatch_size + gap)
+                sy = y + row * (swatch_size + gap)
+                swatch_rect = pygame.Rect(sx, sy, swatch_size, swatch_size)
+                self.color_rects.append(swatch_rect)
+                pygame.draw.rect(surface, (r, g, b), swatch_rect)
+                if i == self.color_grid_index:
+                    pygame.draw.rect(surface, (255, 255, 255), swatch_rect, 3)
+
+            grid_rows = len(COLOR_PALETTE) // self.color_grid_cols
+            y += grid_rows * (swatch_size + gap) + 10
+
+            marker_preview = self.bold_font.render(
+                " (Marker: v)", True, COLOR_PALETTE[self.color_grid_index]
+            )
+            surface.blit(marker_preview, (rect.x + 20, y))
+            y += line_height + 5
+
+            instr_lbl = self.font.render(
+                "[Arrows] Move   [Enter/Click] Confirm", True, TEXT_DIM
+            )
+            surface.blit(instr_lbl, (rect.x + 20, y))
             y += line_height + 5
 
         elif self.state == "INVENTORY":
@@ -330,7 +396,7 @@ class TerminalUI:
             y += 21 * 5 + 10
 
         self.option_rects.clear()
-        if self.state != "NAME_INPUT":
+        if self.state not in ("NAME_INPUT", "COLOR_SELECT"):
             for i, opt in enumerate(self.options):
                 color = self.option_colors[i]
                 is_selected = i == self.selected_index
@@ -352,9 +418,7 @@ class TerminalUI:
             c = self.active_character
             r, g, b = map(int, c["color"].split())
 
-            name_lbl = self.bold_font.render(
-                f"{c['name']} ({c['class'].title()})", True, (r, g, b)
-            )
+            name_lbl = self.bold_font.render(c["name"], True, (r, g, b))
             surface.blit(name_lbl, (rect.x + 20, hud_y))
             self.render_hud_line(surface, rect.x + 20, hud_y + line_height, c)
 
@@ -371,19 +435,6 @@ class TerminalUI:
             h_color = (255, 50, 50)
 
         segments = [(f"HP: {character['hp']}/{character['max_hp']}", h_color)]
-
-        if character["max_mana"] > 0:
-            segments.append(
-                (f"MP: {character['mana']}/{character['max_mana']}", (255, 0, 255))
-            )
-
-        if character["max_stamina"] > 0:
-            segments.append(
-                (
-                    f"SP: {character['stamina']}/{character['max_stamina']}",
-                    (255, 140, 0),
-                )
-            )
 
         drain = character["gold"] // 10
         g_r = 255

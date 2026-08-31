@@ -35,8 +35,7 @@ def list_slots() -> list[dict]:
                     "path": path,
                     "filled": True,
                     "name": data["name"],
-                    "class": data["class"],
-                    "level": data["level"],
+                    "level": data.get("level", 1),
                     "color": data["color"],
                 }
             )
