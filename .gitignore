@@ -13,3 +13,6 @@ saves/
 *test*
 test_*/
 *_test/
+
+# Note files
+*notes*
