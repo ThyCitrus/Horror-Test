@@ -206,7 +206,7 @@ class TerminalUI:
                 )
                 self.active_character = None
                 self.load_slot_menu()
-                self.set_transient("Game saved.", (80, 160, 255))
+                self.set_transient("Game saved.", (80, 160, 255), duration_ms=1500)
             elif event.key == pygame.K_UP:
                 self.selected_index = (self.selected_index - 1) % len(self.options)
                 self.notify_hover()
@@ -260,7 +260,11 @@ class TerminalUI:
                 else:
                     self.creation_name = ""
                     self.state = "NAME_INPUT"
-                    self.add_log("Type character name and press Enter:")
+                    self.set_transient(
+                        "Type character name and press Enter:",
+                        (255, 255, 255),
+                        duration_ms=1500,
+                    )
 
         elif self.state == "DELETE_SELECT":
             filled = [s for s in list_slots() if s["filled"]]
@@ -269,7 +273,9 @@ class TerminalUI:
             else:
                 target = filled[sel]
                 delete_slot(target["slot"])
-                self.add_log(f"Slot {target['slot']} deleted.", (255, 100, 100))
+                self.add_log(
+                    f"Slot {target['slot']} deleted.", (255, 100, 100), duration_ms=1500
+                )
                 self.load_slot_menu()
 
         elif self.state == "PLAYING":
