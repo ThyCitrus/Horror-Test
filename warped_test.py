@@ -12,8 +12,6 @@ DIRECTIONS = {
     "W": (-1, 0),
 }
 
-seed_rng = random.Random(min(0, 2**32 - 1))  # For reproducible dungeon generation
-
 
 class Rect:
 
@@ -69,16 +67,20 @@ def carve_ring(tiles, cx, cy, outer_radius, inner_radius):
 
 
 # =====================================================================
-# PASS 1: STRUCTURE GEOMETRY PLACEMENT
+# PASS 1: STRUCTURE GEOMETRY PLACEMENT (SOLID ROOMS, NO EARLY DOORS)
 # =====================================================================
 
 
 def try_build_room(attach_point, tiles, placed_rects, structures):
     dx, dy = attach_point["dir"]
-    max_dim, min_dim = 16, 6
+    max_dim, min_dim = 20, 5
 
     w = random.randint(min_dim, max_dim)
-    h = random.randint(min_dim, max_dim)
+    h = random.randint(min_dim, min(max_dim, int(w * 1.5)))
+    if h / w > 1.5:
+        h = int(w * 1.5)
+    if w / h > 1.5:
+        w = int(h * 1.5)
 
     if dx == 1:
         x1, y1 = attach_point["x"] + 1, attach_point["y"] - h // 2
@@ -103,7 +105,7 @@ def try_build_room(attach_point, tiles, placed_rects, structures):
 
 def try_build_hallway(attach_point, tiles, placed_rects, structures):
     dx, dy = attach_point["dir"]
-    length = random.randint(8, 16)
+    length = random.randint(10, 25)
     total_width = 5
 
     if dx != 0:
@@ -129,7 +131,6 @@ def try_build_hallway(attach_point, tiles, placed_rects, structures):
         "type": "hallway",
         "far_x": far_x,
         "far_y": far_y,
-        "dir": (dx, dy),
         "rect": new_rect,
     }
     structures.append(info)
@@ -138,7 +139,7 @@ def try_build_hallway(attach_point, tiles, placed_rects, structures):
 
 def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
     dx, dy = attach_point["dir"]
-    leg1 = random.randint(6, 12)
+    leg1 = random.randint(6, 15)
     total_width = 5
 
     if dx != 0:
@@ -162,7 +163,7 @@ def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
     if any(leg1_rect.overlaps(r) for r in placed_rects):
         return False
 
-    leg2 = random.randint(6, 12)
+    leg2 = random.randint(6, 15)
     tdx, tdy = turn_dir
     if tdx != 0:
         x2 = elbow_x + 1 if tdx == 1 else elbow_x - leg2
@@ -182,6 +183,7 @@ def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
     carve_rect(tiles, x1, y1, w1, h1)
     carve_rect(tiles, x2, y2, w2, h2)
 
+    # Seamless open elbow corner
     for jx in range(elbow_x - 1, elbow_x + 2):
         for jy in range(elbow_y - 1, elbow_y + 2):
             tiles[(jx, jy)] = FLOOR
@@ -194,26 +196,12 @@ def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
 
     info = {
         "type": "elbow",
-        "far_x": far_x,
-        "far_y": far_y,
-        "dir": turn_dir,
+        "end_x": far_x,
+        "end_y": far_y,
         "rect": leg2_rect,
-        "rects": [leg1_rect, leg2_rect],
     }
     structures.append(info)
     return info
-
-
-def get_rect_for_adjacency(struct):
-    if struct["type"] == "elbow":
-        rects = struct.get("rects", [struct["rect"]])
-        xs = []
-        ys = []
-        for r in rects:
-            xs.extend([r.x1, r.x2])
-            ys.extend([r.y1, r.y2])
-        return Rect(min(xs), min(ys), max(xs), max(ys))
-    return struct["rect"]
 
 
 def try_build_circular_room(attach_point, tiles, placed_rects, structures, radius=7):
@@ -265,7 +253,6 @@ def try_build_ring_room(
         "cx": cx,
         "cy": cy,
         "outer_radius": outer_radius,
-        "inner_radius": inner_radius,
         "rect": new_rect,
     }
     structures.append(info)
@@ -293,7 +280,7 @@ def try_build_pillar_room(attach_point, tiles, placed_rects, structures):
 
     carve_rect(tiles, x1, y1, w, h)
 
-    pillars = []
+    # 3x2 grid of 2x2 interior pillars
     start_x = x1 + 4
     start_y = y1 + 4
     for row in range(2):
@@ -303,7 +290,6 @@ def try_build_pillar_room(attach_point, tiles, placed_rects, structures):
             for ox in range(2):
                 for oy in range(2):
                     tiles[(px + ox, py + oy)] = WALL
-                    pillars.append((px + ox, py + oy))
 
     placed_rects.append(new_rect)
 
@@ -311,7 +297,6 @@ def try_build_pillar_room(attach_point, tiles, placed_rects, structures):
         "type": "pillar",
         "center_x": x1 + w // 2,
         "center_y": y1 + h // 2,
-        "pillars": set(pillars),
         "rect": new_rect,
     }
     structures.append(info)
@@ -321,23 +306,6 @@ def try_build_pillar_room(attach_point, tiles, placed_rects, structures):
 def queue_attachment_points(structure, attach_queue):
     rect = structure["rect"]
     x1, y1, x2, y2 = rect.x1, rect.y1, rect.x2, rect.y2
-
-    if structure["type"] == "ring":
-        cx, cy = structure["cx"], structure["cy"]
-        r = structure["outer_radius"]
-        for side, (dx, dy) in DIRECTIONS.items():
-            attach_queue.append({"x": cx + dx * r, "y": cy + dy * r, "dir": (dx, dy)})
-        return
-
-    if structure["type"] in ("hallway", "elbow"):
-        attach_queue.append(
-            {
-                "x": structure["far_x"],
-                "y": structure["far_y"],
-                "dir": structure["dir"],
-            }
-        )
-        return
 
     sides = [("N", (0, -1)), ("S", (0, 1)), ("E", (1, 0)), ("W", (-1, 0))]
     for side_name, (dx, dy) in sides:
@@ -353,109 +321,90 @@ def queue_attachment_points(structure, attach_queue):
 
 
 # =====================================================================
-# PASS 2: DYNAMIC CONNECTIVITY & ORTHOGONAL DOORWAY CARVING
+# PASS 2: DYNAMIC CONNECTIVITY & MATCHED DOORWAY CARVING
 # =====================================================================
 
 
 def carve_matched_doors_pass(tiles, structures):
-    """Evaluates adjacent structures and cuts matched grid connections."""
+    """
+    Evaluates adjacent structures and cuts matched openings through shared
+    wall boundaries or Raycast paths without width mismatches or orphaned walls.
+    """
     for i in range(len(structures)):
         s1 = structures[i]
-        r1 = get_rect_for_adjacency(s1)
+        r1 = s1["rect"]
 
         for j in range(i + 1, len(structures)):
             s2 = structures[j]
-            r2 = get_rect_for_adjacency(s2)
+            r2 = s2["rect"]
 
+            # Fast check if bounding boxes touch or overlap
             if not r1.overlaps(r2, buffer=1):
                 continue
 
-            connect_adjacent_structures(tiles, s1, s2)
+            connect_adjacent_structures(tiles, r1, r2)
 
 
-def connect_adjacent_structures(tiles, s1, s2):
-    """Punches door/corridor openings where two structures meet."""
-    r1, r2 = s1["rect"], s2["rect"]
+def connect_adjacent_structures(tiles, r1, r2):
+    """Punches door/corridor openings where two structure bounding boxes meet."""
     shared_walls = []
 
+    # Check shared horizontal or vertical boundary lines
     min_x, max_x = max(r1.x1, r2.x1), min(r1.x2, r2.x2)
     min_y, max_y = max(r1.y1, r2.y1), min(r1.y2, r2.y2)
 
-    # Vertical shared boundary
+    # Vertical shared boundary (East/West)
     if min_y + 1 <= max_y - 1:
         for x in range(min_x, max_x + 1):
             for y in range(min_y + 1, max_y):
-                if is_invalid_carve_target(s1, s2, x, y):
-                    continue
+                # Look for wall tiles that separate two floor areas
                 left_floor = tiles.get((x - 1, y)) == FLOOR
                 right_floor = tiles.get((x + 1, y)) == FLOOR
                 if left_floor and right_floor:
                     shared_walls.append((x, y))
 
-    # Horizontal shared boundary
+    # Horizontal shared boundary (North/South)
     if min_x + 1 <= max_x - 1:
         for y in range(min_y, max_y + 1):
             for x in range(min_x + 1, max_x):
-                if is_invalid_carve_target(s1, s2, x, y):
-                    continue
                 top_floor = tiles.get((x, y - 1)) == FLOOR
                 bottom_floor = tiles.get((x, y + 1)) == FLOOR
                 if top_floor and bottom_floor:
                     shared_walls.append((x, y))
 
-    if shared_walls:
-        shared_walls.sort()
-        mid_idx = len(shared_walls) // 2
-        wx, wy = shared_walls[mid_idx]
-        tiles[(wx, wy)] = FLOOR
+    if not shared_walls:
+        # Fallback for circular/curved walls: connect interior floor centers directly
+        c1 = ((r1.x1 + r1.x2) // 2, (r1.y1 + r1.y2) // 2)
+        c2 = ((r2.x1 + r2.x2) // 2, (r2.y1 + r2.y2) // 2)
+        carve_line_connector(tiles, c1[0], c1[1], c2[0], c2[1])
+        return
 
-        if len(shared_walls) >= 3:
-            alt_x, alt_y = shared_walls[mid_idx - 1]
-            tiles[(alt_x, alt_y)] = FLOOR
-    else:
-        c1 = get_structure_center(s1)
-        c2 = get_structure_center(s2)
-        carve_orthogonal_connector(tiles, s1, s2, c1[0], c1[1], c2[0], c2[1])
+    # Pick a shared wall region and carve a matched 2-wide or 1-wide door
+    shared_walls.sort()
+    mid_idx = len(shared_walls) // 2
+    wx, wy = shared_walls[mid_idx]
 
+    tiles[(wx, wy)] = FLOOR
 
-def is_invalid_carve_target(s1, s2, x, y):
-    """Prevents connectors from carving into ring holes or interior room pillars."""
-    for s in (s1, s2):
-        if s["type"] == "ring":
-            cx, cy = s["cx"], s["cy"]
-            dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-            if dist < s["inner_radius"]:
-                return True
-        elif s["type"] == "pillar":
-            if (x, y) in s.get("pillars", set()):
-                return True
-    return False
+    # Carve a 2-wide doorway if available space allows
+    if len(shared_walls) >= 3:
+        alt_x, alt_y = shared_walls[mid_idx - 1]
+        tiles[(alt_x, alt_y)] = FLOOR
 
 
-def get_structure_center(struct):
-    if struct["type"] in ("circle", "ring"):
-        return struct["cx"], struct["cy"]
-    r = struct["rect"]
-    return (r.x1 + r.x2) // 2, (r.y1 + r.y2) // 2
-
-
-def carve_orthogonal_connector(tiles, s1, s2, x0, y0, x1, y1):
-    """Carves a strictly grid-aligned pathway without destroying pillars or inner ring spaces."""
-    curr_x, curr_y = x0, y0
-
-    # Step horizontally first
-    step_x = 1 if x1 > x0 else -1
-    while curr_x != x1:
-        curr_x += step_x
-        if not is_invalid_carve_target(s1, s2, curr_x, curr_y):
-            tiles[(curr_x, curr_y)] = FLOOR
-
-    # Step vertically second
-    step_y = 1 if y1 > y0 else -1
-    while curr_y != y1:
-        curr_y += step_y
-        if not is_invalid_carve_target(s1, s2, curr_x, curr_y):
-            tiles[(curr_x, curr_y)] = FLOOR
+def carve_line_connector(tiles, x0, y0, x1, y1):
+    """Carves a 2x2 path between interior points for circular/curved rooms."""
+    line = bresenham_line(x0, y0, x1, y1)
+    for x, y in line:
+        if tiles.get((x, y)) == FLOOR and (x, y) not in (
+            (x0, y0),
+            (x1, y1),
+        ):
+            # Stop carving once deep inside target room
+            pass
+        tiles[(x, y)] = FLOOR
+        tiles[(x + 1, y)] = FLOOR
+        tiles[(x, y + 1)] = FLOOR
 
 
 def enclose_dungeon_walls(tiles):
@@ -562,40 +511,23 @@ def place_stairs(tiles, info):
         return
 
     t = info["type"]
-
-    # Pick an initial candidate coordinate based on structure type
     if t == "room":
-        cx = info["x1"] + info["w"] // 2
-        cy = info["y1"] + info["h"] // 2
+        sx, sy = info["x1"] + info["w"] // 2, info["y1"] + info["h"] // 2
     elif t in ("hallway", "elbow"):
-        cx, cy = info["far_x"], info["far_y"]
-    elif t == "circle":
-        cx, cy = info["cx"], info["cy"]
-    elif t == "ring":
-        # Start from a point definitely in the ring band
-        cx = info["cx"] + info["outer_radius"] - 1
-        cy = info["cy"]
+        sx, sy = (
+            (info["far_x"], info["far_y"])
+            if t == "hallway"
+            else (info["end_x"], info["end_y"])
+        )
+    elif t in ("circle", "ring"):
+        sx, sy = info["cx"], info["cy"]
     elif t == "pillar":
-        cx, cy = info["center_x"], info["center_y"]
+        sx, sy = info["center_x"], info["center_y"]
     else:
         return
 
-    # If the exact center is floor, use it
-    if tiles.get((cx, cy)) == FLOOR:
-        tiles[(cx, cy)] = STAIRS
-        return
-
-    # Otherwise, search in expanding squares until we hit a floor tile
-    max_radius = max(info.get("w", 10), info.get("h", 10), info.get("radius", 10), 20)
-    for r in range(1, max_radius + 1):
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                if abs(dx) != r and abs(dy) != r:
-                    continue  # only the perimeter of the square
-                x, y = cx + dx, cy + dy
-                if tiles.get((x, y)) == FLOOR:
-                    tiles[(x, y)] = STAIRS
-                    return
+    if tiles.get((sx, sy)) == FLOOR:
+        tiles[(sx, sy)] = STAIRS
 
 
 def bresenham_line(x0, y0, x1, y1):
@@ -711,7 +643,5 @@ def print_dungeon(tiles):
 
 
 if __name__ == "__main__":
-    seed = random.randint(0, 2**32 - 1)
-    dungeon = generate_dungeon(max_structures=15, seed=seed)
-    print(f"Seed: {seed}")
+    dungeon = generate_dungeon(max_structures=15, seed=None)
     print_dungeon(dungeon)

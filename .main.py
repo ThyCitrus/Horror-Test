@@ -300,6 +300,8 @@ def main():
         )
 
         pygame.display.flip()
+        "print seed for debugging"
+        # print(f"seed={active_seed}")
 
     pygame.quit()
 
