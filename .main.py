@@ -1,5 +1,6 @@
 import random
 import pygame
+import math
 
 from dungeon_gen import (
     generate_dungeon,
@@ -44,6 +45,7 @@ def main():
     pygame.display.set_caption("Dungeon Crawler")
     clock = pygame.time.Clock()
 
+    font_cache = {}
     stretch_font_cache = {}
     font = pygame.font.SysFont(FONT_NAME, 18)
     bold_font = pygame.font.SysFont(FONT_NAME, 18, bold=True)
@@ -195,6 +197,8 @@ def main():
         camera_start_x = visual_x - VIEWPORT_TILES_X / 2
         camera_start_y = visual_y - VIEWPORT_TILES_Y / 2
 
+        draw_queue = []
+
         for wx, wy in visible_tiles:
             if wx == player_x and wy == player_y:
                 continue
@@ -207,9 +211,10 @@ def main():
             )
             brightness = get_fog_brightness(player_x, player_y, wx, wy)
 
+            dist = math.hypot(wx - player_x, wy - player_y)
+
             if stretch is not None:
                 dx, dy = wx - player_x, wy - player_y
-                dist = (dx * dx + dy * dy) ** 0.5
                 dir_x, dir_y = dx / dist, dy / dist
 
                 base_color = tuple(int(c * brightness) for c in WALL_COLOR)
@@ -220,58 +225,50 @@ def main():
                 for i in range(stack_count):
                     grow = 1.0 + (i / stack_count) * stretch * 3.0
                     font_size = int(tile_size * 0.9 * grow)
-                    stack_font = stretch_font_cache.get(font_size)
-                    if stack_font is None:
-                        stack_font = pygame.font.SysFont(FONT_NAME, font_size)
-                        stretch_font_cache[font_size] = stack_font
+                    if font_size not in stretch_font_cache:
+                        stretch_font_cache[font_size] = pygame.font.SysFont(
+                            FONT_NAME, font_size
+                        )
+                    stack_font = stretch_font_cache[font_size]
+
                     glyph_surf = stack_font.render(WALL, True, base_color)
+
+                    # (fetch/create font as you already do)
 
                     push = i * cell_spacing_x * 0.6
                     gx = base_cx + dir_x * push
                     gy = base_cy + dir_y * push
 
-                    rect = glyph_surf.get_rect(
-                        center=(gx + cell_spacing_x / 2, gy + cell_spacing_y / 2)
+                    rect_center = (gx + cell_spacing_x / 2, gy + cell_spacing_y / 2)
+                    draw_queue.append(
+                        (dist + i * 0.1, WALL, base_color, rect_center, font_size)
                     )
-                    if (
-                        0 <= rect.centerx <= map_width
-                        and 0 <= rect.centery <= screen.get_height()
-                    ):
-                        screen.blit(glyph_surf, rect)
-                continue
+            else:
+                base_color = WALL_COLOR if char == WALL else FLOOR_COLOR
+                color = tuple(int(c * brightness) for c in base_color)
+                cx = offset_x + (wx - camera_start_x) * cell_spacing_x
+                cy = offset_y + (wy - camera_start_y) * cell_spacing_y
+                rect_center = (cx + cell_spacing_x / 2, cy + cell_spacing_y / 2)
+                draw_queue.append(
+                    (dist, char, color, rect_center, int(tile_size * 0.9))
+                )
 
-            base_color = WALL_COLOR if char == WALL else FLOOR_COLOR
-            color = tuple(int(c * brightness) for c in base_color)
-            glyph_surf = map_font.render(char, True, color)
+        # Add enemies similarly, with their own dist
 
-            cx = offset_x + (wx - camera_start_x) * cell_spacing_x
-            cy = offset_y + (wy - camera_start_y) * cell_spacing_y
-            rect = glyph_surf.get_rect(
-                center=(cx + cell_spacing_x / 2, cy + cell_spacing_y / 2)
-            )
+        draw_queue.sort(key=lambda item: item[0], reverse=True)  # far → near
+
+        for dist, char, color, center, font_size in draw_queue:
+            if font_size not in font_cache:
+                font_cache[font_size] = pygame.font.SysFont(FONT_NAME, font_size)
+            f = font_cache[font_size]
+
+            surf = f.render(char, True, color)
+            rect = surf.get_rect(center=center)
             if (
                 0 <= rect.centerx <= map_width
                 and 0 <= rect.centery <= screen.get_height()
             ):
-                screen.blit(glyph_surf, rect)
-
-        for enemy in enemies:
-            char = enemy.enemy_type.glyph
-            brightness = get_fog_brightness(player_x, player_y, enemy.x, enemy.y)
-            color = tuple(int(c * brightness) for c in enemy.enemy_type.color)
-            glyph_surf = map_font.render(char, True, color)
-
-            cx = offset_x + (enemy.x - camera_start_x) * cell_spacing_x
-            cy = offset_y + (enemy.y - camera_start_y) * cell_spacing_y
-            rect = glyph_surf.get_rect(
-                center=(cx + cell_spacing_x / 2, cy + cell_spacing_y / 2)
-            )
-            if (
-                0 <= rect.centerx <= map_width
-                and 0 <= rect.centery <= screen.get_height()
-                and (enemy.x, enemy.y) in visible_tiles
-            ):
-                screen.blit(glyph_surf, rect)
+                screen.blit(surf, rect)
 
         px = offset_x + (VIEWPORT_TILES_X / 2) * cell_spacing_x
         py = offset_y + (VIEWPORT_TILES_Y / 2) * cell_spacing_y

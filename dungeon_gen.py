@@ -637,18 +637,32 @@ def has_line_of_sight(dungeon, x0, y0, x1, y1):
 
 FOG_START_RADIUS = 1
 FOG_END_RADIUS = 7
-FOG_MIN_BRIGHTNESS = 0.08
+FOG_MIN_BRIGHTNESS = 0.05
 
 
 def get_fog_brightness(px, py, tx, ty):
-    dist = ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5
+    dist = math.hypot(tx - px, ty - py)
+
     if dist <= FOG_START_RADIUS:
         return 1.0
     if dist >= FOG_END_RADIUS:
         return FOG_MIN_BRIGHTNESS
+
+    # Normalize distance to [0, 1] over [FOG_START_RADIUS, FOG_END_RADIUS]
     span = FOG_END_RADIUS - FOG_START_RADIUS
-    progress = (dist - FOG_START_RADIUS) / span
-    return 1.0 - progress * (1.0 - FOG_MIN_BRIGHTNESS)
+    t = (dist - FOG_START_RADIUS) / span  # t in [0, 1]
+
+    # Logarithmic-style falloff:
+    # Use log(1 + k*t) / log(1 + k) so that:
+    #   t = 0 -> factor = 0
+    #   t = 1 -> factor = 1
+    # Larger k => sharper drop near the start.
+    k = 6.0  # tweak this to adjust "sharpness"
+    factor = math.log(1 + k * t) / math.log(1 + k)
+
+    # Map factor from [0,1] to brightness from 1.0 down to FOG_MIN_BRIGHTNESS
+    brightness = 1.0 - factor * (1.0 - FOG_MIN_BRIGHTNESS)
+    return max(FOG_MIN_BRIGHTNESS, min(1.0, brightness))
 
 
 def compute_visible_tiles(dungeon, px, py, radius=10):
