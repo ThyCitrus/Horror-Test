@@ -11,38 +11,42 @@ PANEL_DIVIDER = (80, 80, 80)
 ENABLE_MOUSE_NAVIGATION = True
 
 COLOR_PALETTE = [
-    # Reds / oranges
-    (220, 60, 60),  # strong red (keep)
-    (255, 140, 0),  # orange (keep)
-    (230, 210, 80),  # yellow (keep)
-    # Greens – push one more teal, one more leaf-green
-    (140, 220, 60),  # lime-green (keep)
-    (40, 180, 120),  # deeper teal-green (changed from 60,200,100)
-    # Cyans / blues – separate cyan from sky-blue
-    (40, 210, 210),  # clearer cyan (slightly tweaked from 60,220,220)
-    (60, 160, 255),  # sky-blue (changed from 80,200,255)
-    (80, 80, 240),  # deeper blue (changed from 100,100,255)
-    # Purples / magentas – make them more distinct
-    (170, 60, 230),  # vivid purple (slightly tweaked from 160,60,220)
-    (220, 70, 150),  # rose-pink (changed from 220,80,160)
-    (255, 80, 190),  # hot pink (changed from 255,90,200)
-    # Browns / neutrals
-    (200, 130, 60),  # brown/orange (keep)
-    (255, 255, 255),  # white (keep)
-    (180, 180, 180),  # lighter gray (slightly brighter than 200,200,200)
-    # Extra purple and green – push them away from existing ones
-    (100, 70, 210),  # indigo (changed from 150,90,220)
-    (70, 140, 70),  # darker forest green (changed from 90,160,90)
+    (220, 60, 60),
+    (255, 140, 0),
+    (230, 210, 80),
+    (140, 220, 60),
+    (40, 180, 120),
+    (40, 210, 210),
+    (60, 160, 255),
+    (80, 80, 240),
+    (170, 60, 230),
+    (220, 70, 150),
+    (255, 80, 190),
+    (200, 130, 60),
+    (255, 255, 255),
+    (180, 180, 180),
+    (100, 70, 210),
+    (70, 140, 70),
 ]
 COLOR_GRID_COLS = 4
 
 
-# --- Virtual Terminal UI ---
 class TerminalUI:
-    def __init__(self, font, bold_font, on_slot_hover_callback):
+    def __init__(
+        self,
+        font,
+        bold_font,
+        on_slot_hover_callback,
+        on_join_address=None,
+        on_mp_color_confirm=None,
+        on_multiplayer_quit=None,
+    ):
         self.font = font
         self.bold_font = bold_font
         self.on_slot_hover_callback = on_slot_hover_callback
+        self.on_join_address = on_join_address
+        self.on_mp_color_confirm = on_mp_color_confirm
+        self.on_multiplayer_quit = on_multiplayer_quit
         self.transient_message = None
 
         self.state = "START"
@@ -68,6 +72,18 @@ class TerminalUI:
         self.color_rects = []
         self._sync_color_from_index()
 
+        # --- multiplayer state ---
+        self.pending_mode = None  # None | "singleplayer" | "host" | "join"
+        self.join_address = ""
+        self.mp_creation_name = ""
+        self.mp_creation_color = "255 255 255"
+        self.mp_taken_names = []
+        self.mp_taken_colors = []
+        self.mp_color_grid_index = 0
+        self.network_mode = False
+        self.mp_hud_player = None  # {"name", "color", "alive"} for guests only
+        self.hosting_info = None
+
         self.load_start_menu()
 
     def add_log(self, text, color=TEXT_WHITE):
@@ -87,9 +103,17 @@ class TerminalUI:
             if self.selected_index < len(slots):
                 self.on_slot_hover_callback(slots[self.selected_index])
 
+    # --- menu navigation ---
+
     def load_start_menu(self):
         self.state = "START"
-        self.set_options(["Play Game", "Quit"])
+        self.pending_mode = None
+        self.hosting_info = None  # new
+        self.set_options(["Singleplayer", "Multiplayer", "Quit"])
+
+    def load_multiplayer_menu(self):
+        self.state = "MULTIPLAYER_MENU"
+        self.set_options(["Host", "Join", "Back"])
 
     def load_slot_menu(self):
         self.state = "SLOT_SELECT"
@@ -123,6 +147,8 @@ class TerminalUI:
         colors = [tuple(map(int, s["color"].split())) for s in slots] + [TEXT_WHITE]
         self.set_options(labels, colors)
 
+    # --- singleplayer color grid (unchanged) ---
+
     def _move_color_selection(self, dcol, drow):
         rows = len(COLOR_PALETTE) // self.color_grid_cols
         row = self.color_grid_index // self.color_grid_cols
@@ -155,8 +181,100 @@ class TerminalUI:
         self.active_character = character
         self.enter_playing_state(f"Character {character['name']} created!")
 
+    # --- multiplayer color grid (skips taken swatches) ---
+
+    def _mp_color_string(self, index):
+        r, g, b = COLOR_PALETTE[index]
+        return f"{r} {g} {b}"
+
+    def _sync_mp_color_from_index(self):
+        self.mp_creation_color = self._mp_color_string(self.mp_color_grid_index)
+
+    def _first_free_color_index(self):
+        for i in range(len(COLOR_PALETTE)):
+            if self._mp_color_string(i) not in self.mp_taken_colors:
+                return i
+        return 0  # degenerate: everyone's taken every swatch
+
+    def _move_mp_color_selection(self, dcol, drow):
+        rows = len(COLOR_PALETTE) // self.color_grid_cols
+        row = self.mp_color_grid_index // self.color_grid_cols
+        col = self.mp_color_grid_index % self.color_grid_cols
+        for _ in range(len(COLOR_PALETTE)):  # bounded so this can't spin forever
+            col = (col + dcol) % self.color_grid_cols
+            row = (row + drow) % rows
+            idx = row * self.color_grid_cols + col
+            if self._mp_color_string(idx) not in self.mp_taken_colors:
+                self.mp_color_grid_index = idx
+                self._sync_mp_color_from_index()
+                return
+
+    def _confirm_mp_color_selection(self):
+        if self.on_mp_color_confirm:
+            self.on_mp_color_confirm(
+                self.mp_creation_name.strip(), self.mp_creation_color
+            )
+        self.state = "JOINING"
+        self.set_options([])
+
+    # --- transitions driven by main.py in response to network events ---
+
+    def show_connecting(self):
+        self.state = "CONNECTING"
+        self.set_options([])
+        self.set_transient("Connecting...", (80, 200, 255), duration_ms=60000)
+
+    def connection_failed(self, reason):
+        self.state = "ADDRESS_INPUT"
+        self.set_transient(
+            f"Connection failed: {reason}", (255, 80, 80), duration_ms=2500
+        )
+
+    def enter_mp_name_input(self, taken_names, taken_colors):
+        self.mp_taken_names = taken_names
+        self.mp_taken_colors = taken_colors
+        self.mp_creation_name = ""
+        self.state = "MP_NAME_INPUT"
+        self.set_options([])
+        self.set_transient(
+            "Type character name and press Enter:", (255, 255, 255), duration_ms=1500
+        )
+
+    def mp_join_rejected(self, reason, taken_names, taken_colors):
+        self.mp_taken_names = taken_names
+        self.mp_taken_colors = taken_colors
+        if reason in ("name_taken", "name_empty"):
+            msg = (
+                "Name already taken."
+                if reason == "name_taken"
+                else "Name cannot be empty!"
+            )
+            self.state = "MP_NAME_INPUT"
+            self.set_options([])
+            self.set_transient(msg, (255, 80, 80), duration_ms=2000)
+        else:  # color_taken
+            self.mp_color_grid_index = self._first_free_color_index()
+            self._sync_mp_color_from_index()
+            self.state = "MP_COLOR_SELECT"
+            self.set_options([])
+            self.set_transient(
+                "Someone else just took that color.", (255, 80, 80), duration_ms=2000
+            )
+
+    def enter_multiplayer_playing(self, name, color):
+        self.network_mode = True
+        self.mp_hud_player = {"name": name, "color": color, "alive": True}
+        self.return_to_playing()
+        self.set_transient(f"Connected as {name}!", (80, 255, 80), duration_ms=2000)
+
+    # --- input handling ---
+
     def handle_input(self, event):
-        # 1. Isolating Text Input Phase
+        # 1. Passive states main.py will transition us out of — nothing to do
+        if self.state in ("CONNECTING", "JOINING"):
+            return
+
+        # 2. Text input phases
         if self.state == "NAME_INPUT":
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
@@ -173,7 +291,46 @@ class TerminalUI:
                     self.creation_name += event.unicode
             return
 
-        # 2. Color grid has its own nav — separate from the vertical option list
+        if self.state == "ADDRESS_INPUT":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN:
+                    if self.join_address.strip():
+                        if self.on_join_address:
+                            self.on_join_address(self.join_address.strip())
+                    else:
+                        self.set_transient(
+                            "Address cannot be empty!", (255, 80, 80), duration_ms=1500
+                        )
+                elif event.key == pygame.K_BACKSPACE:
+                    self.join_address = self.join_address[:-1]
+                elif event.unicode.isprintable() and len(self.join_address) < 40:
+                    self.join_address += event.unicode
+            return
+
+        if self.state == "MP_NAME_INPUT":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN:
+                    name = self.mp_creation_name.strip()
+                    if not name:
+                        self.set_transient(
+                            "Name cannot be empty!", (255, 80, 80), duration_ms=1500
+                        )
+                    elif name in self.mp_taken_names:
+                        self.set_transient(
+                            "Name already taken.", (255, 80, 80), duration_ms=1500
+                        )
+                    else:
+                        self.mp_color_grid_index = self._first_free_color_index()
+                        self._sync_mp_color_from_index()
+                        self.state = "MP_COLOR_SELECT"
+                        self.set_options([])
+                elif event.key == pygame.K_BACKSPACE:
+                    self.mp_creation_name = self.mp_creation_name[:-1]
+                elif event.unicode.isprintable() and len(self.mp_creation_name) < 16:
+                    self.mp_creation_name += event.unicode
+            return
+
+        # 3. Color grids — own nav, separate from the vertical option list
         if self.state == "COLOR_SELECT":
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_LEFT:
@@ -205,28 +362,81 @@ class TerminalUI:
                         self.confirm_color_selection()
             return
 
-        # 3. General Key Navigation
+        if self.state == "MP_COLOR_SELECT":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_LEFT:
+                    self._move_mp_color_selection(-1, 0)
+                elif event.key == pygame.K_RIGHT:
+                    self._move_mp_color_selection(1, 0)
+                elif event.key == pygame.K_UP:
+                    self._move_mp_color_selection(0, -1)
+                elif event.key == pygame.K_DOWN:
+                    self._move_mp_color_selection(0, 1)
+                elif event.key == pygame.K_RETURN:
+                    self._confirm_mp_color_selection()
+            elif ENABLE_MOUSE_NAVIGATION and event.type == pygame.MOUSEMOTION:
+                mx, my = event.pos
+                for i, rect in enumerate(self.color_rects):
+                    if (
+                        rect.collidepoint(mx, my)
+                        and self._mp_color_string(i) not in self.mp_taken_colors
+                    ):
+                        self.mp_color_grid_index = i
+                        self._sync_mp_color_from_index()
+            elif (
+                ENABLE_MOUSE_NAVIGATION
+                and event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1
+            ):
+                mx, my = event.pos
+                for i, rect in enumerate(self.color_rects):
+                    if (
+                        rect.collidepoint(mx, my)
+                        and self._mp_color_string(i) not in self.mp_taken_colors
+                    ):
+                        self.mp_color_grid_index = i
+                        self._sync_mp_color_from_index()
+                        self._confirm_mp_color_selection()
+            return
+
+        # 4. General key navigation
         if event.type == pygame.KEYDOWN:
             if (
                 self.state in ("PLAYING", "INVENTORY", "MAP")
                 and event.key == pygame.K_ESCAPE
             ):
-                save_json(
-                    self.active_character, slot_path(self.active_character["slot"])
-                )
-                self.active_character = None
-                self.load_slot_menu()
-                self.set_transient("Game saved.", (80, 160, 255), duration_ms=1500)
-            elif event.key == pygame.K_UP:
+                if self.network_mode:
+                    if self.active_character:
+                        save_json(
+                            self.active_character,
+                            slot_path(self.active_character["slot"]),
+                        )
+                    if self.on_multiplayer_quit:
+                        self.on_multiplayer_quit()
+                    self.network_mode = False
+                    self.mp_hud_player = None
+                    self.active_character = None
+                    self.hosting_info = None  # new
+                    self.load_start_menu()
+                    self.set_transient(
+                        "Disconnected.", (80, 160, 255), duration_ms=1500
+                    )
+                else:
+                    save_json(
+                        self.active_character, slot_path(self.active_character["slot"])
+                    )
+                    self.active_character = None
+                    self.load_slot_menu()
+                    self.set_transient("Game saved.", (80, 160, 255), duration_ms=1500)
+            elif event.key == pygame.K_UP and self.options:
                 self.selected_index = (self.selected_index - 1) % len(self.options)
                 self.notify_hover()
-            elif event.key == pygame.K_DOWN:
+            elif event.key == pygame.K_DOWN and self.options:
                 self.selected_index = (self.selected_index + 1) % len(self.options)
                 self.notify_hover()
-            elif event.key == pygame.K_RETURN:
+            elif event.key == pygame.K_RETURN and self.options:
                 self.execute_selection()
 
-        # 4. Mouse Navigation
         elif ENABLE_MOUSE_NAVIGATION and event.type == pygame.MOUSEMOTION:
             mx, my = event.pos
             for i, rect in enumerate(self.option_rects):
@@ -250,10 +460,29 @@ class TerminalUI:
 
         if self.state == "START":
             if sel == 0:
+                self.pending_mode = "singleplayer"
                 self.load_slot_menu()
             elif sel == 1:
+                self.load_multiplayer_menu()
+            elif sel == 2:
                 pygame.quit()
                 sys.exit()
+
+        elif self.state == "MULTIPLAYER_MENU":
+            if sel == 0:
+                self.pending_mode = "host"
+                self.load_slot_menu()
+            elif sel == 1:
+                self.pending_mode = "join"
+                self.join_address = ""
+                self.state = "ADDRESS_INPUT"
+                self.set_transient(
+                    "Enter host address (ip:port) and press Enter:",
+                    (255, 255, 255),
+                    duration_ms=2000,
+                )
+            elif sel == 2:
+                self.load_start_menu()
 
         elif self.state == "SLOT_SELECT":
             slots = list_slots()
@@ -312,7 +541,17 @@ class TerminalUI:
                 self.creation_name = ""
                 self.state = "NAME_INPUT"
 
-    def render(self, surface, rect, dungeon=None, discovered=None, player_pos=None):
+    # --- rendering ---
+
+    def render(
+        self,
+        surface,
+        rect,
+        dungeon=None,
+        discovered=None,
+        player_pos=None,
+        other_players=None,
+    ):
         pygame.draw.rect(surface, PANEL_BG, rect)
         pygame.draw.line(surface, PANEL_DIVIDER, (rect.x, 0), (rect.x, rect.height), 2)
 
@@ -334,10 +573,37 @@ class TerminalUI:
             else:
                 self.transient_message = None
 
+        if self.network_mode and self.state == "PLAYING" and other_players:
+            y += 5
+            for cid, p in other_players.items():
+                label = p["name"]
+                if not p.get("connected", True):
+                    label += " (disconnected)"
+                if not p.get("alive", True):
+                    color = TEXT_DIM
+                else:
+                    color = tuple(map(int, p["color"].split()))
+                lbl = self.font.render(f"* {label}", True, color)
+                surface.blit(lbl, (rect.x + 20, y))
+                y += line_height
+            y += 5
+
         y += 10
         if self.state == "NAME_INPUT":
             prompt = self.font.render(
                 f"> Name: {self.creation_name}_", True, (80, 200, 255)
+            )
+            surface.blit(prompt, (rect.x + 20, y))
+
+        elif self.state == "ADDRESS_INPUT":
+            prompt = self.font.render(
+                f"> Address: {self.join_address}_", True, (80, 200, 255)
+            )
+            surface.blit(prompt, (rect.x + 20, y))
+
+        elif self.state == "MP_NAME_INPUT":
+            prompt = self.font.render(
+                f"> Name: {self.mp_creation_name}_", True, (80, 200, 255)
             )
             surface.blit(prompt, (rect.x + 20, y))
 
@@ -348,9 +614,14 @@ class TerminalUI:
             surface.blit(name_lbl, (rect.x + 20, y))
             y += line_height + 5
 
-        elif self.state == "COLOR_SELECT":
+        elif self.state in ("COLOR_SELECT", "MP_COLOR_SELECT"):
+            is_mp = self.state == "MP_COLOR_SELECT"
+            name_for_prompt = self.mp_creation_name if is_mp else self.creation_name
+            taken_colors = self.mp_taken_colors if is_mp else []
+            grid_index = self.mp_color_grid_index if is_mp else self.color_grid_index
+
             hint_lbl = self.font.render(
-                f"Choose a color, {self.creation_name}:", True, TEXT_WHITE
+                f"Choose a color, {name_for_prompt}:", True, TEXT_WHITE
             )
             surface.blit(hint_lbl, (rect.x + 20, y))
             y += line_height + 10
@@ -365,16 +636,18 @@ class TerminalUI:
                 sy = y + row * (swatch_size + gap)
                 swatch_rect = pygame.Rect(sx, sy, swatch_size, swatch_size)
                 self.color_rects.append(swatch_rect)
-                pygame.draw.rect(surface, (r, g, b), swatch_rect)
-                if i == self.color_grid_index:
+
+                taken = f"{r} {g} {b}" in taken_colors
+                draw_color = tuple(c // 3 for c in (r, g, b)) if taken else (r, g, b)
+                pygame.draw.rect(surface, draw_color, swatch_rect)
+                if not taken and i == grid_index:
                     pygame.draw.rect(surface, (255, 255, 255), swatch_rect, 3)
 
             grid_rows = len(COLOR_PALETTE) // self.color_grid_cols
             y += grid_rows * (swatch_size + gap) + 10
 
-            marker_preview = self.bold_font.render(
-                " (Marker: v)", True, COLOR_PALETTE[self.color_grid_index]
-            )
+            preview_color = COLOR_PALETTE[grid_index]
+            marker_preview = self.bold_font.render(" (Marker: v)", True, preview_color)
             surface.blit(marker_preview, (rect.x + 20, y))
             y += line_height + 5
 
@@ -398,21 +671,26 @@ class TerminalUI:
             y += 10
 
         elif self.state == "MAP" and dungeon is not None and discovered is not None:
+            hud_color = (80, 200, 255)
+            if self.active_character:
+                hud_color = tuple(map(int, self.active_character["color"].split()))
+            elif self.mp_hud_player:
+                hud_color = tuple(map(int, self.mp_hud_player["color"].split()))
             self.render_minimap(
-                surface,
-                rect.x + 20,
-                y,
-                dungeon,
-                discovered,
-                player_pos,
-                self.active_character
-                and tuple(map(int, self.active_character["color"].split()))
-                or (80, 200, 255),
+                surface, rect.x + 20, y, dungeon, discovered, player_pos, hud_color
             )
             y += 21 * 5 + 10
 
         self.option_rects.clear()
-        if self.state not in ("NAME_INPUT", "COLOR_SELECT"):
+        if self.state not in (
+            "NAME_INPUT",
+            "COLOR_SELECT",
+            "ADDRESS_INPUT",
+            "MP_NAME_INPUT",
+            "MP_COLOR_SELECT",
+            "CONNECTING",
+            "JOINING",
+        ):
             for i, opt in enumerate(self.options):
                 color = self.option_colors[i]
                 is_selected = i == self.selected_index
@@ -428,6 +706,12 @@ class TerminalUI:
 
         if self.active_character:
             hud_y = rect.height - 80
+            if self.hosting_info:
+                code_lbl = self.font.render(
+                    f"Join code: {self.hosting_info}", True, TEXT_DIM
+                )
+                surface.blit(code_lbl, (rect.x + 20, hud_y - line_height * 2))
+
             hint_lbl = self.font.render("[Esc] Save & Quit to Menu", True, TEXT_DIM)
             surface.blit(hint_lbl, (rect.x + 20, hud_y - line_height))
 
@@ -437,6 +721,16 @@ class TerminalUI:
             name_lbl = self.bold_font.render(c["name"], True, (r, g, b))
             surface.blit(name_lbl, (rect.x + 20, hud_y))
             self.render_hud_line(surface, rect.x + 20, hud_y + line_height, c)
+
+        elif self.mp_hud_player:
+            hud_y = rect.height - 80
+            hint_lbl = self.font.render("[Esc] Disconnect", True, TEXT_DIM)
+            surface.blit(hint_lbl, (rect.x + 20, hud_y - line_height))
+
+            p = self.mp_hud_player
+            r, g, b = map(int, p["color"].split())
+            name_lbl = self.bold_font.render(p["name"], True, (r, g, b))
+            surface.blit(name_lbl, (rect.x + 20, hud_y))
 
     def render_hud_line(self, surface, x, y, character):
         health_percent = character["hp"] / character["max_hp"]
@@ -476,6 +770,9 @@ class TerminalUI:
     def return_to_playing(self):
         self.state = "PLAYING"
         self.set_options(["Inventory", "Map"])
+
+    def set_hosting_info(self, info):
+        self.hosting_info = info
 
     def enter_playing_state(self, message):
         self.return_to_playing()

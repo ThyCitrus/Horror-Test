@@ -1,6 +1,6 @@
-import random
-import pygame
 import math
+import pygame
+import socket
 
 from dungeon_gen import (
     generate_dungeon,
@@ -12,9 +12,10 @@ from dungeon_gen import (
     get_fog_brightness,
     find_adjacent_spawn,
 )
-from enemies import Enemy, ENEMY_TYPES
-from terminal_ui import TerminalUI, TEXT_WHITE, TEXT_DIM
+from enemies import Enemy, ENEMY_TYPES  # TODO: currently unused — no spawn logic yet
+from terminal_ui import TerminalUI
 from save_utils import load_json, save_json, slot_path
+from network import GameServer, GameClient, DEFAULT_PORT
 
 WINDOW_WIDTH, WINDOW_HEIGHT = 1200, 660
 VIEWPORT_TILES_X, VIEWPORT_TILES_Y = 15, 11
@@ -23,13 +24,13 @@ FONT_NAME = "consolas"
 WALL_COLOR = (150, 150, 150)
 FLOOR_COLOR = (60, 60, 60)
 
-DIRECTIONS = {"N": (0, -1), "S": (0, 1), "E": (1, 0), "W": (-1, 0)}
 DIRECTION_KEYS = {
     pygame.K_w: ((0, -1), "^"),
     pygame.K_s: ((0, 1), "v"),
     pygame.K_a: ((-1, 0), "<"),
     pygame.K_d: ((1, 0), ">"),
 }
+FACING_FOR_DELTA = {(0, -1): "^", (0, 1): "v", (-1, 0): "<", (1, 0): ">"}
 
 
 def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
@@ -56,7 +57,16 @@ def main():
     floor_tiles = [pos for pos, char in dungeon.items() if char == FLOOR]
     player_x, player_y = floor_tiles[0] if floor_tiles else (0, 0)
     player_color = (80, 200, 255)
-    enemies = []
+    player_facing = "v"
+    enemies = []  # TODO: never populated yet — enemy spawn logic not implemented
+
+    # --- multiplayer state ---
+    net_server = None  # GameServer — only set on the host
+    net_client = None  # GameClient — set on host and joiners alike
+    local_client_id = None
+    players = (
+        {}
+    )  # client_id -> {x,y,visual_x,visual_y,facing,color,name,alive,connected}
 
     def handle_slot_hover(slot_info, get_current=False):
         nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies
@@ -80,14 +90,154 @@ def main():
             player_x, player_y = preview_floors[0] if preview_floors else (0, 0)
             player_color = (120, 120, 120)
 
-        ex, ey = find_adjacent_spawn(dungeon, player_x, player_y)
         enemies = []
 
-    terminal = TerminalUI(font, bold_font, handle_slot_hover)
+    # --- multiplayer glue ---
+
+    def start_host():
+        nonlocal net_server, net_client, local_client_id
+        net_server = GameServer(
+            seed=active_seed,
+            port=DEFAULT_PORT,
+            spawn_fn=lambda: find_adjacent_spawn(dungeon, player_x, player_y),
+        )
+        net_server.start()
+        net_client = GameClient()
+        net_client.connect("127.0.0.1", DEFAULT_PORT)
+        local_client_id = net_client.client_id
+        char = terminal.active_character
+        net_client.send_join(char["name"], char["color"])
+        terminal.set_hosting_info(f"{get_local_ip()}:{DEFAULT_PORT}")
+
+    def attempt_join(address_text):
+        nonlocal net_client, local_client_id
+        host_part, _, port_part = address_text.partition(":")
+        try:
+            port = int(port_part) if port_part else DEFAULT_PORT
+            client = GameClient()
+            client.connect(host_part, port)
+            net_client = client
+            local_client_id = client.client_id
+            terminal.show_connecting()
+        except (OSError, ValueError) as e:
+            terminal.connection_failed(str(e))
+
+    def confirm_mp_color(name, color):
+        if net_client:
+            net_client.send_join(name, color)
+
+    def teardown_multiplayer():
+        nonlocal net_server, net_client, local_client_id, players
+        if net_client:
+            net_client.disconnect()
+        if net_server:
+            net_server.stop()
+        net_server = None
+        net_client = None
+        local_client_id = None
+        players = {}
+
+    def sync_players_from_state(state_players):
+        for cid, pdata in state_players.items():
+            if cid not in players:
+                players[cid] = {
+                    "x": pdata["x"],
+                    "y": pdata["y"],
+                    "visual_x": float(pdata["x"]),
+                    "visual_y": float(pdata["y"]),
+                    "facing": pdata["facing"],
+                    "color": pdata["color"],
+                    "name": pdata["name"],
+                    "alive": pdata["alive"],
+                    "connected": pdata["connected"],
+                }
+            else:
+                p = players[cid]
+                p["x"], p["y"] = pdata["x"], pdata["y"]
+                p["facing"] = pdata["facing"]
+                p["color"] = pdata["color"]
+                p["name"] = pdata["name"]
+                p["alive"] = pdata["alive"]
+                p["connected"] = pdata["connected"]
+
+    def handle_network_message(msg):
+        nonlocal dungeon
+        mtype = msg.get("type")
+
+        if mtype == "roster":
+            dungeon = generate_dungeon(max_structures=60, seed=msg["seed"])
+            if msg.get("reconnect"):
+                you = msg["you"]
+                players[local_client_id] = {
+                    "x": 0,
+                    "y": 0,
+                    "visual_x": 0.0,
+                    "visual_y": 0.0,
+                    "facing": "v",
+                    "color": you["color"],
+                    "name": you["name"],
+                    "alive": True,
+                    "connected": True,
+                }
+                terminal.enter_multiplayer_playing(you["name"], you["color"])
+            elif terminal.state == "CONNECTING":
+                terminal.enter_mp_name_input(
+                    msg.get("taken_names", []), msg.get("taken_colors", [])
+                )
+            # else: this is the host's own loopback roster — host auto-joins
+            # separately in start_host(), nothing to do here.
+
+        elif mtype == "join_ack":
+            is_host = net_server is not None
+            players[local_client_id] = {
+                "x": player_x if is_host else 0,
+                "y": player_y if is_host else 0,
+                "visual_x": float(player_x if is_host else 0),
+                "visual_y": float(player_y if is_host else 0),
+                "facing": player_facing,
+                "color": msg["color"],
+                "name": msg["name"],
+                "alive": True,
+                "connected": True,
+            }
+            if is_host:
+                net_server.update_player_position(
+                    local_client_id, player_x, player_y, player_facing
+                )
+            terminal.enter_multiplayer_playing(msg["name"], msg["color"])
+
+        elif mtype == "join_reject":
+            terminal.mp_join_rejected(
+                msg.get("reason"),
+                msg.get("taken_names", []),
+                msg.get("taken_colors", []),
+            )
+
+        elif mtype == "state":
+            sync_players_from_state(msg["players"])
+
+        elif mtype == "disconnected":
+            teardown_multiplayer()
+            terminal.network_mode = False
+            terminal.mp_hud_player = None
+            terminal.active_character = None
+            terminal.hosting_info = None  # new
+            terminal.load_start_menu()
+            terminal.set_transient(
+                "Disconnected from host.", (255, 80, 80), duration_ms=2500
+            )
+
+    terminal = TerminalUI(
+        font,
+        bold_font,
+        handle_slot_hover,
+        on_join_address=attempt_join,
+        on_mp_color_confirm=confirm_mp_color,
+        on_multiplayer_quit=teardown_multiplayer,
+    )
 
     visual_x, visual_y = float(player_x), float(player_y)
     discovered = set()
-    player_facing = "v"
 
     pending_moves = {}
     time_since_last_move = 0
@@ -116,11 +266,26 @@ def main():
             else:
                 terminal.handle_input(event)
 
+        # --- network inbox ---
+        if net_client:
+            for msg in net_client.poll_messages():
+                handle_network_message(msg)
+
+        # --- host: auto-start server once slot-creation flow lands in PLAYING ---
         if (
-            terminal.active_character
-            and terminal.state != "NAME_INPUT"
-            and time_since_last_move >= 150
+            terminal.pending_mode == "host"
+            and net_server is None
+            and terminal.state == "PLAYING"
+            and terminal.active_character
+            and not terminal.network_mode
         ):
+            start_host()
+
+        # --- movement input ---
+        can_move = (terminal.active_character and not terminal.network_mode) or (
+            terminal.network_mode and local_client_id in players
+        )
+        if can_move and terminal.state != "NAME_INPUT" and time_since_last_move >= 150:
             keys = pygame.key.get_pressed()
             candidates = [
                 (pending_moves.get(k, now), k)
@@ -152,7 +317,38 @@ def main():
 
                 (dx, dy), glyph = DIRECTION_KEYS[chosen_key]
                 player_facing = glyph
-                target_x, target_y = player_x + dx, player_y + dy
+
+                if terminal.network_mode:
+                    net_client.send_input(dx, dy)
+                    if local_client_id in players:
+                        players[local_client_id]["facing"] = glyph
+                else:
+                    target_x, target_y = player_x + dx, player_y + dy
+                    blocked_by_enemy = any(
+                        (e.x, e.y) == (target_x, target_y) for e in enemies
+                    )
+                    if (
+                        dungeon.get((target_x, target_y), WALL) != WALL
+                        and not blocked_by_enemy
+                    ):
+                        player_x, player_y = target_x, target_y
+                        if terminal.active_character:
+                            terminal.active_character["player_x"] = player_x
+                            terminal.active_character["player_y"] = player_y
+                            save_json(
+                                terminal.active_character,
+                                slot_path(terminal.active_character["slot"]),
+                            )
+
+                time_since_last_move = 0
+
+        # --- host-only: resolve every connected player's pending move ---
+        if net_server is not None:
+            for cid, pdata in net_server.get_players_snapshot().items():
+                mdx, mdy = net_server.consume_and_clear_input(cid)
+                if mdx == 0 and mdy == 0:
+                    continue
+                target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
                 blocked_by_enemy = any(
                     (e.x, e.y) == (target_x, target_y) for e in enemies
                 )
@@ -160,25 +356,46 @@ def main():
                     dungeon.get((target_x, target_y), WALL) != WALL
                     and not blocked_by_enemy
                 ):
-                    player_x, player_y = target_x, target_y
+                    facing = FACING_FOR_DELTA.get((mdx, mdy), pdata["facing"])
+                    net_server.update_player_position(cid, target_x, target_y, facing)
 
-                    if terminal.active_character:
-                        terminal.active_character["player_x"] = player_x
-                        terminal.active_character["player_y"] = player_y
-                        save_json(
-                            terminal.active_character,
-                            slot_path(terminal.active_character["slot"]),
-                        )
+        def get_local_ip():
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            except OSError:
+                return "127.0.0.1"
+            finally:
+                s.close()
 
-                time_since_last_move = 0
+        # --- visual smoothing ---
+        if terminal.network_mode:
+            for p in players.values():
+                p["visual_x"] += (p["x"] - p["visual_x"]) * min(1.0, dt * 0.008)
+                p["visual_y"] += (p["y"] - p["visual_y"]) * min(1.0, dt * 0.008)
+        else:
+            visual_x += (player_x - visual_x) * min(1.0, dt * 0.008)
+            visual_y += (player_y - visual_y) * min(1.0, dt * 0.008)
 
-        visual_x += (player_x - visual_x) * min(1.0, dt * 0.008)
-        visual_y += (player_y - visual_y) * min(1.0, dt * 0.008)
-        visible_tiles = compute_visible_tiles(dungeon, player_x, player_y, radius=10)
+        # --- which position/camera drives rendering this frame ---
+        if terminal.network_mode:
+            local_p = players[local_client_id]
+            cam_x, cam_y = local_p["visual_x"], local_p["visual_y"]
+            px, py = local_p["x"], local_p["y"]
+            display_facing = local_p["facing"]
+            display_color = tuple(map(int, local_p["color"].split()))
+        else:
+            cam_x, cam_y = visual_x, visual_y
+            px, py = player_x, player_y
+            display_facing = player_facing
+            display_color = player_color
+
+        visible_tiles = compute_visible_tiles(dungeon, px, py, radius=10)
         visible_tiles = reveal_boundary_walls(dungeon, visible_tiles)
         discovered.update(visible_tiles)
         for enemy in enemies:
-            enemy.update(dt, dungeon, player_x, player_y, WALL)
+            enemy.update(dt, dungeon, px, py, WALL)
 
         screen.fill((0, 0, 0))
         panel_width = screen.get_width() // 2
@@ -194,27 +411,27 @@ def main():
         offset_x = (map_width - (VIEWPORT_TILES_X * cell_spacing_x)) / 2
         offset_y = (screen.get_height() - (VIEWPORT_TILES_Y * cell_spacing_y)) / 2
 
-        camera_start_x = visual_x - VIEWPORT_TILES_X / 2
-        camera_start_y = visual_y - VIEWPORT_TILES_Y / 2
+        camera_start_x = cam_x - VIEWPORT_TILES_X / 2
+        camera_start_y = cam_y - VIEWPORT_TILES_Y / 2
 
         draw_queue = []
 
         for wx, wy in visible_tiles:
-            if wx == player_x and wy == player_y:
+            if wx == px and wy == py:
                 continue
             char = dungeon.get((wx, wy), WALL)
 
             stretch = (
-                get_stretch_factor(player_x, player_y, wx, wy, max_range=10)
+                get_stretch_factor(px, py, wx, wy, max_range=10)
                 if char == WALL
                 else None
             )
-            brightness = get_fog_brightness(player_x, player_y, wx, wy)
+            brightness = get_fog_brightness(px, py, wx, wy)
 
-            dist = math.hypot(wx - player_x, wy - player_y)
+            dist = math.hypot(wx - px, wy - py)
 
             if stretch is not None:
-                dx, dy = wx - player_x, wy - player_y
+                dx, dy = wx - px, wy - py
                 dir_x, dir_y = dx / dist, dy / dist
 
                 base_color = tuple(int(c * brightness) for c in WALL_COLOR)
@@ -229,11 +446,6 @@ def main():
                         stretch_font_cache[font_size] = pygame.font.SysFont(
                             FONT_NAME, font_size
                         )
-                    stack_font = stretch_font_cache[font_size]
-
-                    glyph_surf = stack_font.render(WALL, True, base_color)
-
-                    # (fetch/create font as you already do)
 
                     push = i * cell_spacing_x * 0.6
                     gx = base_cx + dir_x * push
@@ -253,9 +465,9 @@ def main():
                     (dist, char, color, rect_center, int(tile_size * 0.9))
                 )
 
-        # Add enemies similarly, with their own dist
+        # TODO: enemies aren't added to draw_queue yet — needs its own dist entry per enemy
 
-        draw_queue.sort(key=lambda item: item[0], reverse=True)  # far → near
+        draw_queue.sort(key=lambda item: item[0], reverse=True)  # far -> near
 
         for dist, char, color, center, font_size in draw_queue:
             if font_size not in font_cache:
@@ -270,15 +482,50 @@ def main():
             ):
                 screen.blit(surf, rect)
 
-        px = offset_x + (VIEWPORT_TILES_X / 2) * cell_spacing_x
-        py = offset_y + (VIEWPORT_TILES_Y / 2) * cell_spacing_y
-        p_surf = map_font.render(player_facing, True, player_color)
+        px_screen = offset_x + (VIEWPORT_TILES_X / 2) * cell_spacing_x
+        py_screen = offset_y + (VIEWPORT_TILES_Y / 2) * cell_spacing_y
+        p_surf = map_font.render(display_facing, True, display_color)
         screen.blit(
             p_surf,
-            p_surf.get_rect(center=(px + cell_spacing_x / 2, py + cell_spacing_y / 2)),
+            p_surf.get_rect(
+                center=(px_screen + cell_spacing_x / 2, py_screen + cell_spacing_y / 2)
+            ),
         )
 
-        if terminal.state == "NAME_INPUT":
+        # --- remote teammates (MVP: no fog/occlusion, always drawn if on-screen) ---
+        if terminal.network_mode:
+            for cid, p in players.items():
+                if cid == local_client_id or not p.get("connected", True):
+                    continue
+                rel_x = p["visual_x"] - camera_start_x
+                rel_y = p["visual_y"] - camera_start_y
+                if not (
+                    0 <= rel_x <= VIEWPORT_TILES_X and 0 <= rel_y <= VIEWPORT_TILES_Y
+                ):
+                    continue
+                gcx = offset_x + rel_x * cell_spacing_x
+                gcy = offset_y + rel_y * cell_spacing_y
+                glyph_color = (
+                    tuple(map(int, p["color"].split()))
+                    if p.get("alive", True)
+                    else (90, 90, 90)
+                )
+                other_surf = map_font.render(p["facing"], True, glyph_color)
+                screen.blit(
+                    other_surf,
+                    other_surf.get_rect(
+                        center=(gcx + cell_spacing_x / 2, gcy + cell_spacing_y / 2)
+                    ),
+                )
+
+        if terminal.state in (
+            "NAME_INPUT",
+            "ADDRESS_INPUT",
+            "CONNECTING",
+            "MP_NAME_INPUT",
+            "MP_COLOR_SELECT",
+            "JOINING",
+        ):
             pause_overlay = pygame.Surface(
                 (map_width, screen.get_height()), pygame.SRCALPHA
             )
@@ -291,14 +538,23 @@ def main():
             )
             screen.blit(paused_lbl, lbl_rect)
 
+        other_players_for_hud = (
+            {cid: p for cid, p in players.items() if cid != local_client_id}
+            if terminal.network_mode
+            else None
+        )
         terminal_rect = pygame.Rect(map_width, 0, panel_width, screen.get_height())
         terminal.render(
-            screen, terminal_rect, dungeon, discovered, (player_x, player_y)
+            screen,
+            terminal_rect,
+            dungeon,
+            discovered,
+            (px, py),
+            other_players=other_players_for_hud,
         )
 
         pygame.display.flip()
-        "print seed for debugging"
-        # print(f"seed={active_seed}")
+        # print(f"seed={active_seed}")  # debug
 
     pygame.quit()
 

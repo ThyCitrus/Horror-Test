@@ -6,8 +6,9 @@ __pycache__/
 # VS Code
 .vscode/
 
-# Save files (if you don't want them in the repo)
+# Save files and client ID path
 saves/
+client_id.txt
 
 # Test files
 *test*
