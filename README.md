@@ -46,14 +46,14 @@ A terminal-UI styled horror dungeon crawler built with **Pygame**, featuring pro
    cd horror-test
 
 
-Install dependencies:
+2. Install dependencies:
 
 ```Bash
 pip install -r requirements.txt
 Run the game:
 ```
 ```Bash
-python main.py
+python .main.py
 ```
 ## Controls
 W / A / S / D: Move character / Change facing direction
