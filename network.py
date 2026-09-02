@@ -21,7 +21,7 @@ from pathlib import Path
 
 DEFAULT_PORT = 5555
 BROADCAST_HZ = 10
-CLIENT_ID_PATH = Path("client_id.txt")
+CLIENT_ID_PATH = Path(__file__).resolve().parent / "client_id.txt"
 
 
 # --- Local persistent client identity (not a security boundary, just continuity) ---

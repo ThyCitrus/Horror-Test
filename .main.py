@@ -31,6 +31,7 @@ DIRECTION_KEYS = {
     pygame.K_d: ((1, 0), ">"),
 }
 FACING_FOR_DELTA = {(0, -1): "^", (0, 1): "v", (-1, 0): "<", (1, 0): ">"}
+TEXT_INPUT_STATES = {"NAME_INPUT", "ADDRESS_INPUT", "MP_NAME_INPUT"}
 
 
 def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
@@ -257,7 +258,7 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif terminal.state == "NAME_INPUT":
+            elif terminal.state in TEXT_INPUT_STATES:
                 terminal.handle_input(event)
             elif event.type == pygame.KEYDOWN and event.key in DIRECTION_KEYS:
                 pending_moves[event.key] = now
