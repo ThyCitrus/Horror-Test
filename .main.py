@@ -11,6 +11,8 @@ from dungeon_gen import (
     reveal_boundary_walls,
     get_fog_brightness,
     find_adjacent_spawn,
+    LOBBY_SEED,
+    build_lobby_dungeon,
 )
 from enemies import Enemy, ENEMY_TYPES  # TODO: currently unused — no spawn logic yet
 from terminal_ui import TerminalUI
@@ -85,8 +87,12 @@ def main():
             player_y = char_data.get("player_y", floor_tiles[0][1])
             player_color = tuple(map(int, char_data["color"].split()))
         else:
-            active_seed = seed_rng.randint(0, 999999)
-            dungeon = generate_dungeon(max_structures=60, seed=active_seed)
+            if terminal.pending_mode == "host":
+                active_seed = LOBBY_SEED
+                dungeon = build_lobby_dungeon()
+            else:
+                active_seed = seed_rng.randint(0, 999999)
+                dungeon = generate_dungeon(max_structures=60, seed=active_seed)
             preview_floors = [pos for pos, char in dungeon.items() if char == FLOOR]
             player_x, player_y = preview_floors[0] if preview_floors else (0, 0)
             player_color = (120, 120, 120)
@@ -166,7 +172,12 @@ def main():
         mtype = msg.get("type")
 
         if mtype == "roster":
-            dungeon = generate_dungeon(max_structures=60, seed=msg["seed"])
+            seed = msg["seed"]
+            dungeon = (
+                build_lobby_dungeon()
+                if seed == LOBBY_SEED
+                else generate_dungeon(max_structures=60, seed=seed)
+            )
             if msg.get("reconnect"):
                 you = msg["you"]
                 players[local_client_id] = {

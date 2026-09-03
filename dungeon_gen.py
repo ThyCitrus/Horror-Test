@@ -12,6 +12,37 @@ DIRECTIONS = {
     "W": (-1, 0),
 }
 
+LOBBY_SEED = -1  # sentinel: "load the hand-crafted lobby", never a real generated seed
+
+TILE_CHAR_MAP = {
+    "#": WALL,
+    ".": FLOOR,
+    "‡": LADDER,
+    "|": FLOOR,  # TODO: door placeholder — walkable until door mechanics exist
+    "_": FLOOR,  # TODO: door placeholder — walkable until door mechanics exist
+}
+
+
+def parse_ascii_dungeon(ascii_str):
+    """Converts a hand-drawn ASCII map into the same {(x,y): char} tile dict
+    generate_dungeon() produces. Leading/trailing whitespace per line is
+    preserved — it's real geometry (room offsets), not code indentation."""
+    tiles = {}
+    lines = ascii_str.strip("\n").split("\n")
+    for y, line in enumerate(lines):
+        for x, ch in enumerate(line):
+            tile = TILE_CHAR_MAP.get(ch)
+            if tile is not None:
+                tiles[(x, y)] = tile
+    return tiles
+
+
+def build_lobby_dungeon():
+    from test_lobby import test_lobby
+
+    return parse_ascii_dungeon(test_lobby[0])
+
+
 seed_rng = random.Random(min(0, 2**32 - 1))  # For reproducible dungeon generation
 
 
