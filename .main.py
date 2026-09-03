@@ -45,6 +45,7 @@ def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
 
 def main():
     pygame.init()
+    pygame.mixer.music.load("music/JiggyTime.wav")
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption("Dungeon Crawler")
     clock = pygame.time.Clock()
@@ -248,6 +249,14 @@ def main():
         on_multiplayer_quit=teardown_multiplayer,
     )
 
+    def play_menu_music():
+        pygame.mixer.music.play(-1)
+
+    def stop_menu_music():
+        pygame.mixer.music.stop()
+
+    play_menu_music()
+
     visual_x, visual_y = float(player_x), float(player_y)
     discovered = set()
 
@@ -282,6 +291,9 @@ def main():
         if net_client:
             for msg in net_client.poll_messages():
                 handle_network_message(msg)
+
+        if terminal.state == "PLAYING":
+            stop_menu_music()
 
         # --- host: auto-start server once slot-creation flow lands in PLAYING ---
         if (
