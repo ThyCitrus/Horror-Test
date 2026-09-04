@@ -73,6 +73,8 @@ class GameServer:
         self._lock = threading.RLock()
         self._sock = None
         self._running = False
+        self.pending_interacts = []
+        self.doors_snapshot = {}
 
     def start(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -122,6 +124,11 @@ class GameServer:
                             if client_id in self.players:
                                 self.players[client_id]["dx"] = msg.get("dx", 0)
                                 self.players[client_id]["dy"] = msg.get("dy", 0)
+                    elif mtype == "interact" and client_id:
+                        with self._lock:
+                            self.pending_interacts.append(
+                                (client_id, msg.get("x"), msg.get("y"))
+                            )
         except (ConnectionError, OSError):
             pass
         finally:
@@ -251,6 +258,16 @@ class GameServer:
             if client_id in self.players:
                 self.players[client_id]["alive"] = alive
 
+    def consume_pending_interacts(self):
+        with self._lock:
+            items = self.pending_interacts
+            self.pending_interacts = []
+            return items
+
+    def set_doors_snapshot(self, doors):
+        with self._lock:
+            self.doors_snapshot = {f"{x},{y}": v for (x, y), v in doors.items()}
+
     # --- broadcast thread ---
 
     def _broadcast_loop(self):
@@ -265,6 +282,7 @@ class GameServer:
                         cid: {k: v for k, v in p.items() if k != "socket"}
                         for cid, p in self.players.items()
                     },
+                    "doors": self.doors_snapshot,
                 }
                 dead_sockets = []
                 for cid, p in self.players.items():
@@ -327,3 +345,6 @@ class GameClient:
                     self.inbox.put(msg)
         except (ConnectionError, OSError):
             self.inbox.put({"type": "disconnected"})
+
+    def send_interact(self, x, y):
+        self._stream.send({"type": "interact", "x": x, "y": y})

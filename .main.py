@@ -13,6 +13,13 @@ from dungeon_gen import (
     find_adjacent_spawn,
     LOBBY_SEED,
     build_lobby_dungeon,
+    DOOR,
+    DOOR_ANIM_MS,
+    is_walkable,
+    materialize_door,
+    begin_door_toggle,
+    advance_door_animations,
+    door_render_info,
 )
 from enemies import Enemy, ENEMY_TYPES  # TODO: currently unused — no spawn logic yet
 from terminal_ui import TerminalUI
@@ -22,6 +29,7 @@ from network import GameServer, GameClient, DEFAULT_PORT
 WINDOW_WIDTH, WINDOW_HEIGHT = 1200, 660
 VIEWPORT_TILES_X, VIEWPORT_TILES_Y = 15, 11
 FONT_NAME = "consolas"
+
 
 WALL_COLOR = (150, 150, 150)
 FLOOR_COLOR = (60, 60, 60)
@@ -34,6 +42,7 @@ DIRECTION_KEYS = {
 }
 FACING_FOR_DELTA = {(0, -1): "^", (0, 1): "v", (-1, 0): "<", (1, 0): ">"}
 TEXT_INPUT_STATES = {"NAME_INPUT", "ADDRESS_INPUT", "MP_NAME_INPUT"}
+INTERACT_KEY = pygame.K_e
 
 
 def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
@@ -71,9 +80,10 @@ def main():
     players = (
         {}
     )  # client_id -> {x,y,visual_x,visual_y,facing,color,name,alive,connected}
+    doors = {}  # (x,y) -> {"state": "closed"|"opening"|"open", "anim_start": timestamp}
 
     def handle_slot_hover(slot_info, get_current=False):
-        nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies
+        nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors
         if get_current:
             return active_seed, (player_x, player_y)
 
@@ -88,12 +98,14 @@ def main():
             player_y = char_data.get("player_y", floor_tiles[0][1])
             player_color = tuple(map(int, char_data["color"].split()))
         else:
+            # handle_slot_hover, host-new-character branch:
             if terminal.pending_mode == "host":
                 active_seed = LOBBY_SEED
-                dungeon = build_lobby_dungeon()
+                dungeon, doors = build_lobby_dungeon()
             else:
                 active_seed = seed_rng.randint(0, 999999)
                 dungeon = generate_dungeon(max_structures=60, seed=active_seed)
+                doors = {}
             preview_floors = [pos for pos, char in dungeon.items() if char == FLOOR]
             player_x, player_y = preview_floors[0] if preview_floors else (0, 0)
             player_color = (120, 120, 120)
@@ -135,7 +147,7 @@ def main():
             net_client.send_join(name, color)
 
     def teardown_multiplayer():
-        nonlocal net_server, net_client, local_client_id, players
+        nonlocal net_server, net_client, local_client_id, players, doors
         if net_client:
             net_client.disconnect()
         if net_server:
@@ -144,6 +156,7 @@ def main():
         net_client = None
         local_client_id = None
         players = {}
+        doors = {}
 
     def sync_players_from_state(state_players):
         for cid, pdata in state_players.items():
@@ -169,16 +182,17 @@ def main():
                 p["connected"] = pdata["connected"]
 
     def handle_network_message(msg):
-        nonlocal dungeon
+        nonlocal dungeon, doors
         mtype = msg.get("type")
 
+        # handle_network_message roster branch:
         if mtype == "roster":
             seed = msg["seed"]
-            dungeon = (
-                build_lobby_dungeon()
-                if seed == LOBBY_SEED
-                else generate_dungeon(max_structures=60, seed=seed)
-            )
+            if seed == LOBBY_SEED:
+                dungeon, doors = build_lobby_dungeon()
+            else:
+                dungeon = generate_dungeon(max_structures=60, seed=seed)
+                doors = {}
             if msg.get("reconnect"):
                 you = msg["you"]
                 players[local_client_id] = {
@@ -228,6 +242,11 @@ def main():
 
         elif mtype == "state":
             sync_players_from_state(msg["players"])
+            if net_server is None and "doors" in msg:
+                doors.clear()
+                for key, door_data in msg["doors"].items():
+                    x_str, y_str = key.split(",")
+                    doors[(int(x_str), int(y_str))] = door_data
 
         elif mtype == "disconnected":
             teardown_multiplayer()
@@ -284,6 +303,26 @@ def main():
                 pending_moves[event.key] = now
             elif event.type == pygame.KEYUP and event.key in pending_moves:
                 del pending_moves[event.key]
+            elif (
+                event.type == pygame.KEYDOWN
+                and event.key == INTERACT_KEY
+                and terminal.state == "PLAYING"
+            ):
+                interact_x, interact_y = (
+                    (players[local_client_id]["x"], players[local_client_id]["y"])
+                    if terminal.network_mode and local_client_id in players
+                    else (player_x, player_y)
+                )
+                for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    pos = (interact_x + ddx, interact_y + ddy)
+                    if dungeon.get(pos) != DOOR:
+                        continue
+                    if terminal.network_mode:
+                        net_client.send_interact(*pos)
+                    else:
+                        door = materialize_door(dungeon, doors, *pos)
+                        begin_door_toggle(door, pygame.time.get_ticks())
+                    break
             else:
                 terminal.handle_input(event)
 
@@ -348,40 +387,52 @@ def main():
                         players[local_client_id]["facing"] = glyph
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
-                    blocked_by_enemy = any(
-                        (e.x, e.y) == (target_x, target_y) for e in enemies
-                    )
-                    if (
-                        dungeon.get((target_x, target_y), WALL) != WALL
-                        and not blocked_by_enemy
-                    ):
+                    if is_walkable(dungeon, doors, target_x, target_y, dx, dy):
                         player_x, player_y = target_x, target_y
-                        if terminal.active_character:
-                            terminal.active_character["player_x"] = player_x
-                            terminal.active_character["player_y"] = player_y
-                            save_json(
-                                terminal.active_character,
-                                slot_path(terminal.active_character["slot"]),
-                            )
 
                 time_since_last_move = 0
 
-        # --- host-only: resolve every connected player's pending move ---
+        # --- host-only: resolve pending interacts, door animation, and movement ---
         if net_server is not None:
+            net_server.set_doors_snapshot(doors)
+            for cid, ix, iy in net_server.consume_pending_interacts():
+                if dungeon.get((ix, iy)) != DOOR:
+                    continue
+                door = materialize_door(dungeon, doors, ix, iy)
+                begin_door_toggle(door, pygame.time.get_ticks())
+            advance_door_animations(doors, pygame.time.get_ticks())
             for cid, pdata in net_server.get_players_snapshot().items():
                 mdx, mdy = net_server.consume_and_clear_input(cid)
                 if mdx == 0 and mdy == 0:
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
-                blocked_by_enemy = any(
-                    (e.x, e.y) == (target_x, target_y) for e in enemies
-                )
-                if (
-                    dungeon.get((target_x, target_y), WALL) != WALL
-                    and not blocked_by_enemy
-                ):
+                if is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
                     facing = FACING_FOR_DELTA.get((mdx, mdy), pdata["facing"])
                     net_server.update_player_position(cid, target_x, target_y, facing)
+        elif not terminal.network_mode:
+            advance_door_animations(doors, pygame.time.get_ticks())
+
+            now_ms = pygame.time.get_ticks()
+            for door in doors.values():
+                if door.get("anim_until") and now_ms >= door["anim_until"]:
+                    if door["state"] == "opening":
+                        door["state"] = "open"
+                        door["anim_until"] = None
+                    elif door["state"] == "closing":
+                        door["state"] = "closed"
+                        door["anim_until"] = None
+
+        # Offline games need the same animation completion handling as the
+        # host. Otherwise doors remain permanently in opening/closing state.
+        if net_server is None:
+            now_ms = pygame.time.get_ticks()
+            for door in doors.values():
+                if door.get("anim_until") and now_ms >= door["anim_until"]:
+                    if door["state"] == "opening":
+                        door["state"] = "open"
+                    elif door["state"] == "closing":
+                        door["state"] = "closed"
+                    door["anim_until"] = None
 
         def get_local_ip():
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -415,8 +466,8 @@ def main():
             display_facing = player_facing
             display_color = player_color
 
-        visible_tiles = compute_visible_tiles(dungeon, px, py, radius=10)
-        visible_tiles = reveal_boundary_walls(dungeon, visible_tiles)
+        visible_tiles = compute_visible_tiles(dungeon, doors, px, py, radius=10)
+        visible_tiles = reveal_boundary_walls(dungeon, doors, visible_tiles)
         discovered.update(visible_tiles)
         for enemy in enemies:
             enemy.update(dt, dungeon, px, py, WALL)
@@ -444,10 +495,16 @@ def main():
             if wx == px and wy == py:
                 continue
             char = dungeon.get((wx, wy), WALL)
+            if char == DOOR:
+                draw_char, animating = door_render_info(dungeon, doors, wx, wy)
+                is_wall_like, should_stretch = False, False
+            else:
+                draw_char, is_wall_like = char, (char == WALL)
+                should_stretch = is_wall_like
 
             stretch = (
                 get_stretch_factor(px, py, wx, wy, max_range=10)
-                if char == WALL
+                if should_stretch
                 else None
             )
             brightness = get_fog_brightness(px, py, wx, wy)
@@ -458,7 +515,9 @@ def main():
                 dx, dy = wx - px, wy - py
                 dir_x, dir_y = dx / dist, dy / dist
 
-                base_color = tuple(int(c * brightness) for c in WALL_COLOR)
+                base_wall_color = (
+                    WALL_COLOR if (is_wall_like or char == DOOR) else FLOOR_COLOR
+                )
                 base_cx = offset_x + (wx - camera_start_x) * cell_spacing_x
                 base_cy = offset_y + (wy - camera_start_y) * cell_spacing_y
 
@@ -475,18 +534,27 @@ def main():
                     gx = base_cx + dir_x * push
                     gy = base_cy + dir_y * push
 
+                    stack_fade = max(0.15, 1.0 - (i / max(1, stack_count - 1)) * 0.9)
+                    seg_color = tuple(
+                        int(c * brightness * stack_fade) for c in base_wall_color
+                    )
+
                     rect_center = (gx + cell_spacing_x / 2, gy + cell_spacing_y / 2)
                     draw_queue.append(
-                        (dist + i * 0.1, WALL, base_color, rect_center, font_size)
+                        (dist + i * 0.1, draw_char, seg_color, rect_center, font_size)
                     )
             else:
-                base_color = WALL_COLOR if char == WALL else FLOOR_COLOR
+                # Doors always retain wall coloring, including open and
+                # animated states.
+                base_color = (
+                    WALL_COLOR if is_wall_like or (wx, wy) in doors else FLOOR_COLOR
+                )
                 color = tuple(int(c * brightness) for c in base_color)
                 cx = offset_x + (wx - camera_start_x) * cell_spacing_x
                 cy = offset_y + (wy - camera_start_y) * cell_spacing_y
                 rect_center = (cx + cell_spacing_x / 2, cy + cell_spacing_y / 2)
                 draw_queue.append(
-                    (dist, char, color, rect_center, int(tile_size * 0.9))
+                    (dist, draw_char, color, rect_center, int(tile_size * 0.9))
                 )
 
         # TODO: enemies aren't added to draw_queue yet — needs its own dist entry per enemy

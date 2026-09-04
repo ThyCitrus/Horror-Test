@@ -22,25 +22,123 @@ TILE_CHAR_MAP = {
     "_": FLOOR,  # TODO: door placeholder — walkable until door mechanics exist
 }
 
+WHITE = (255, 255, 255)
+DOOR = "D"
+DOOR_ANIM_MS = 600
+DOOR_GLYPHS = {"V": "|", "H": "_"}
+DOOR_ORIENTATION_FROM_CHAR = {"|": "V", "_": "H"}
+
+TILE_CHAR_MAP = {
+    "#": WALL,
+    ".": FLOOR,
+    "‡": LADDER,
+    "|": DOOR,
+    "_": DOOR,
+}
+
 
 def parse_ascii_dungeon(ascii_str):
-    """Converts a hand-drawn ASCII map into the same {(x,y): char} tile dict
-    generate_dungeon() produces. Leading/trailing whitespace per line is
-    preserved — it's real geometry (room offsets), not code indentation."""
-    tiles = {}
-    lines = ascii_str.strip("\n").split("\n")
-    for y, line in enumerate(lines):
+    tiles, doors = {}, {}
+    for y, line in enumerate(ascii_str.strip("\n").split("\n")):
         for x, ch in enumerate(line):
             tile = TILE_CHAR_MAP.get(ch)
-            if tile is not None:
-                tiles[(x, y)] = tile
-    return tiles
+            if tile is None:
+                continue
+            tiles[(x, y)] = tile
+            if tile == DOOR:
+                doors[(x, y)] = {
+                    "orientation": DOOR_ORIENTATION_FROM_CHAR[ch],
+                    "animating": False,
+                    "anim_until": None,
+                    "pending_orientation": None,
+                }
+    return tiles, doors
 
 
 def build_lobby_dungeon():
     from test_lobby import test_lobby
 
     return parse_ascii_dungeon(test_lobby[0])
+
+
+def _infer_door_orientation(dungeon, x, y):
+    horizontal_sides = (
+        dungeon.get((x - 1, y), WALL) != WALL and dungeon.get((x + 1, y), WALL) != WALL
+    )
+    return "V" if horizontal_sides else "H"
+
+
+def materialize_door(dungeon, doors, x, y):
+    """Ensures doors[(x,y)] exists for a DOOR tile, inferring orientation
+    from surrounding geometry for procedurally-generated doors that were
+    never hand-authored with an explicit orientation."""
+    if (x, y) not in doors:
+        doors[(x, y)] = {
+            "orientation": _infer_door_orientation(dungeon, x, y),
+            "animating": False,
+            "anim_until": None,
+            "pending_orientation": None,
+        }
+    return doors[(x, y)]
+
+
+def begin_door_toggle(door, now_ms, anim_ms=DOOR_ANIM_MS):
+    if door["animating"]:
+        return  # mid-swing already; ignore repeat interacts
+    door["pending_orientation"] = "H" if door["orientation"] == "V" else "V"
+    door["animating"] = True
+    door["anim_until"] = now_ms + anim_ms
+
+
+def advance_door_animations(doors, now_ms):
+    for door in doors.values():
+        if (
+            door["animating"]
+            and door["anim_until"] is not None
+            and now_ms >= door["anim_until"]
+        ):
+            door["orientation"] = door["pending_orientation"]
+            door["animating"] = False
+            door["anim_until"] = None
+            door["pending_orientation"] = None
+
+
+def door_render_info(dungeon, doors, x, y):
+    door = doors.get((x, y))
+    if door is None:
+        orientation, animating = _infer_door_orientation(dungeon, x, y), False
+    else:
+        orientation, animating = door["orientation"], door["animating"]
+    return ("\\" if animating else DOOR_GLYPHS[orientation]), animating
+
+
+def is_walkable(dungeon, doors, x, y, move_dx=0, move_dy=0):
+    tile = dungeon.get((x, y), WALL)
+    if tile == WALL:
+        return False
+    if tile == DOOR:
+        door = doors.get((x, y))
+        if door is not None and door["animating"]:
+            return False
+        orientation = (
+            door["orientation"] if door else _infer_door_orientation(dungeon, x, y)
+        )
+        return move_dx == 0 if orientation == "V" else move_dy == 0
+    return True
+
+
+def vision_blocking_dungeon(dungeon, doors):
+    """View of the dungeon for sight/fog purposes only: closed doors act as
+    walls, opening/open doors act as floor. Doesn't affect the real tile dict."""
+    if not doors:
+        return dungeon
+    merged = dict(dungeon)
+    for pos, door in doors.items():
+        merged[pos] = WALL if door["state"] == "closed" else FLOOR
+    for (x, y), tile in dungeon.items():
+        if tile == DOOR and (x, y) not in doors:
+            merged[(x, y)] = WALL
+    return merged
 
 
 seed_rng = random.Random(min(0, 2**32 - 1))  # For reproducible dungeon generation
@@ -405,7 +503,7 @@ def carve_matched_doors_pass(tiles, structures):
 
 
 def connect_adjacent_structures(tiles, s1, s2):
-    """Punches door/corridor openings where two structures meet."""
+    """Punches a connection, optionally putting a door in its one-wide hall."""
     r1, r2 = s1["rect"], s2["rect"]
     shared_walls = []
 
@@ -434,19 +532,42 @@ def connect_adjacent_structures(tiles, s1, s2):
                 if top_floor and bottom_floor:
                     shared_walls.append((x, y))
 
+    carved = []
     if shared_walls:
         shared_walls.sort()
         mid_idx = len(shared_walls) // 2
         wx, wy = shared_walls[mid_idx]
         tiles[(wx, wy)] = FLOOR
+        carved.append((wx, wy))
 
         if len(shared_walls) >= 3:
             alt_x, alt_y = shared_walls[mid_idx - 1]
             tiles[(alt_x, alt_y)] = FLOOR
+            carved.append((alt_x, alt_y))
     else:
         c1 = get_structure_center(s1)
         c2 = get_structure_center(s2)
-        carve_orthogonal_connector(tiles, s1, s2, c1[0], c1[1], c2[0], c2[1])
+        carved = carve_orthogonal_connector(tiles, s1, s2, c1[0], c1[1], c2[0], c2[1])
+
+    # Doors belong only at room-type boundaries, and only in a one-tile-wide
+    # corridor (for example, #.#).  Keep this chance here so each connection
+    # is evaluated independently.
+    if s1["type"] != s2["type"] and random.random() < 0.50:
+        candidates = [pos for pos in carved if is_one_wide_corridor(tiles, *pos)]
+        if candidates:
+            x, y = random.choice(candidates)
+            tiles[(x, y)] = DOOR
+
+
+def is_one_wide_corridor(tiles, x, y):
+    """Returns whether a floor position has walls on both perpendicular sides."""
+    if tiles.get((x, y)) != FLOOR:
+        return False
+    horizontal = tiles.get((x - 1, y)) == FLOOR and tiles.get((x + 1, y)) == FLOOR
+    vertical = tiles.get((x, y - 1)) == FLOOR and tiles.get((x, y + 1)) == FLOOR
+    boxed_horizontally = tiles.get((x, y - 1)) == WALL and tiles.get((x, y + 1)) == WALL
+    boxed_vertically = tiles.get((x - 1, y)) == WALL and tiles.get((x + 1, y)) == WALL
+    return (horizontal and boxed_horizontally) or (vertical and boxed_vertically)
 
 
 def is_invalid_carve_target(s1, s2, x, y):
@@ -473,6 +594,7 @@ def get_structure_center(struct):
 def carve_orthogonal_connector(tiles, s1, s2, x0, y0, x1, y1):
     """Carves a strictly grid-aligned pathway without destroying pillars or inner ring spaces."""
     curr_x, curr_y = x0, y0
+    carved = []
 
     # Step horizontally first
     step_x = 1 if x1 > x0 else -1
@@ -480,6 +602,7 @@ def carve_orthogonal_connector(tiles, s1, s2, x0, y0, x1, y1):
         curr_x += step_x
         if not is_invalid_carve_target(s1, s2, curr_x, curr_y):
             tiles[(curr_x, curr_y)] = FLOOR
+            carved.append((curr_x, curr_y))
 
     # Step vertically second
     step_y = 1 if y1 > y0 else -1
@@ -487,6 +610,8 @@ def carve_orthogonal_connector(tiles, s1, s2, x0, y0, x1, y1):
         curr_y += step_y
         if not is_invalid_carve_target(s1, s2, curr_x, curr_y):
             tiles[(curr_x, curr_y)] = FLOOR
+            carved.append((curr_x, curr_y))
+    return carved
 
 
 def enclose_dungeon_walls(tiles):
@@ -658,11 +783,26 @@ def bresenham_line(x0, y0, x1, y1):
     return points
 
 
-def has_line_of_sight(dungeon, x0, y0, x1, y1):
+def has_line_of_sight(dungeon, doors, x0, y0, x1, y1):
     line = bresenham_line(x0, y0, x1, y1)
-    for x, y in line[1:-1]:
-        if dungeon.get((x, y), WALL) == WALL:
+    for i in range(1, len(line) - 1):
+        x, y = line[i]
+        tile = dungeon.get((x, y), WALL)
+        if tile == WALL:
             return False
+        if tile == DOOR:
+            door = doors.get((x, y))
+            if door is not None and door["animating"]:
+                continue
+            orientation = (
+                door["orientation"] if door else _infer_door_orientation(dungeon, x, y)
+            )
+            prev_x, prev_y = line[i - 1]
+            step_dx, step_dy = x - prev_x, y - prev_y
+            if orientation == "V" and step_dx != 0:
+                return False
+            if orientation == "H" and step_dy != 0:
+                return False
     return True
 
 
@@ -696,20 +836,20 @@ def get_fog_brightness(px, py, tx, ty):
     return max(FOG_MIN_BRIGHTNESS, min(1.0, brightness))
 
 
-def compute_visible_tiles(dungeon, px, py, radius=10):
+def compute_visible_tiles(dungeon, doors, px, py, radius=10):
     visible = set()
     for dy in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             if dx * dx + dy * dy > radius * radius:
                 continue
             tx, ty = px + dx, py + dy
-            if has_line_of_sight(dungeon, px, py, tx, ty):
+            if has_line_of_sight(dungeon, doors, px, py, tx, ty):
                 visible.add((tx, ty))
     visible.add((px, py))
     return visible
 
 
-def reveal_boundary_walls(dungeon, visible):
+def reveal_boundary_walls(dungeon, doors, visible):
     revealed = set(visible)
     for x, y in visible:
         if dungeon.get((x, y)) == WALL:
@@ -724,9 +864,9 @@ def reveal_boundary_walls(dungeon, visible):
             (-1, 1),
             (-1, -1),
         ):
-            nx, ny = x + dx, y + dy
-            if dungeon.get((nx, ny)) == WALL:
-                revealed.add((nx, ny))
+            neighbor = dungeon.get((x + dx, y + dy))
+            if neighbor in (WALL, DOOR):
+                revealed.add((x + dx, y + dy))
     return revealed
 
 
