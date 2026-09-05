@@ -41,6 +41,7 @@ DIRECTION_KEYS = {
     pygame.K_d: ((1, 0), ">"),
 }
 FACING_FOR_DELTA = {(0, -1): "^", (0, 1): "v", (-1, 0): "<", (1, 0): ">"}
+DELTA_FOR_FACING = {"^": (0, -1), "v": (0, 1), "<": (-1, 0), ">": (1, 0)}
 TEXT_INPUT_STATES = {"NAME_INPUT", "ADDRESS_INPUT", "MP_NAME_INPUT"}
 INTERACT_KEY = pygame.K_e
 
@@ -308,15 +309,17 @@ def main():
                 and event.key == INTERACT_KEY
                 and terminal.state == "PLAYING"
             ):
-                interact_x, interact_y = (
-                    (players[local_client_id]["x"], players[local_client_id]["y"])
-                    if terminal.network_mode and local_client_id in players
-                    else (player_x, player_y)
-                )
-                for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    pos = (interact_x + ddx, interact_y + ddy)
-                    if dungeon.get(pos) != DOOR:
-                        continue
+                if terminal.network_mode and local_client_id in players:
+                    interact_x = players[local_client_id]["x"]
+                    interact_y = players[local_client_id]["y"]
+                    facing = players[local_client_id]["facing"]
+                else:
+                    interact_x, interact_y = player_x, player_y
+                    facing = player_facing
+
+                ddx, ddy = DELTA_FOR_FACING.get(facing, (0, 1))
+                pos = (interact_x + ddx, interact_y + ddy)
+                if dungeon.get(pos) == DOOR:
                     if terminal.network_mode:
                         net_client.send_interact(*pos)
                     else:
@@ -406,9 +409,13 @@ def main():
                 if mdx == 0 and mdy == 0:
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
+                facing = FACING_FOR_DELTA.get((mdx, mdy), pdata["facing"])
                 if is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
-                    facing = FACING_FOR_DELTA.get((mdx, mdy), pdata["facing"])
                     net_server.update_player_position(cid, target_x, target_y, facing)
+                else:
+                    net_server.update_player_position(
+                        cid, pdata["x"], pdata["y"], facing
+                    )
         elif not terminal.network_mode:
             advance_door_animations(doors, pygame.time.get_ticks())
 
@@ -541,18 +548,22 @@ def main():
 
                     rect_center = (gx + cell_spacing_x / 2, gy + cell_spacing_y / 2)
                     draw_queue.append(
-                        (dist + i * 0.1, draw_char, seg_color, rect_center, font_size)
+                        (dist - i * 0.1, draw_char, seg_color, rect_center, font_size)
                     )
             else:
-                # Doors always retain wall coloring, including open and
-                # animated states.
-                base_color = (
-                    WALL_COLOR if is_wall_like or (wx, wy) in doors else FLOOR_COLOR
+                base_color = tuple(
+                    int(c * brightness)
+                    for c in (
+                        WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
+                    )
                 )
-                color = tuple(int(c * brightness) for c in base_color)
+                color = base_color
                 cx = offset_x + (wx - camera_start_x) * cell_spacing_x
                 cy = offset_y + (wy - camera_start_y) * cell_spacing_y
-                rect_center = (cx + cell_spacing_x / 2, cy + cell_spacing_y / 2)
+                center_x = cx + cell_spacing_x / 2
+                if draw_char == "|":
+                    center_x += cell_spacing_x * 0.18
+                rect_center = (center_x, cy + cell_spacing_y / 2)
                 draw_queue.append(
                     (dist, draw_char, color, rect_center, int(tile_size * 0.9))
                 )
@@ -589,6 +600,8 @@ def main():
             for cid, p in players.items():
                 if cid == local_client_id or not p.get("connected", True):
                     continue
+                if (p["x"], p["y"]) not in visible_tiles:
+                    continue
                 rel_x = p["visual_x"] - camera_start_x
                 rel_y = p["visual_y"] - camera_start_y
                 if not (
@@ -597,11 +610,13 @@ def main():
                     continue
                 gcx = offset_x + rel_x * cell_spacing_x
                 gcy = offset_y + rel_y * cell_spacing_y
-                glyph_color = (
+                brightness = get_fog_brightness(px, py, p["x"], p["y"])
+                base_color = (
                     tuple(map(int, p["color"].split()))
                     if p.get("alive", True)
                     else (90, 90, 90)
                 )
+                glyph_color = tuple(int(c * brightness) for c in base_color)
                 other_surf = map_font.render(p["facing"], True, glyph_color)
                 screen.blit(
                     other_surf,
