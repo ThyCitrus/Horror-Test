@@ -1,4 +1,6 @@
 import sys
+import math
+import array
 import pygame
 
 from save_utils import list_slots, load_json, save_json, slot_path, delete_slot
@@ -61,6 +63,7 @@ class TerminalUI:
         ]
         self.options = []
         self.option_colors = []
+        self._hover_sound = None
 
         self.creation_slot = None
         self.creation_name = ""
@@ -102,6 +105,26 @@ class TerminalUI:
             slots = list_slots()
             if self.selected_index < len(slots):
                 self.on_slot_hover_callback(slots[self.selected_index])
+
+    def _play_hover_sound(self):
+        if self._hover_sound is None:
+            mixer_settings = pygame.mixer.get_init()
+            if mixer_settings:
+                frequency, sample_format, channels = mixer_settings
+                if sample_format == -16:
+                    sample_count = max(1, int(frequency * 0.045))
+                    samples = array.array("h")
+                    for i in range(sample_count):
+                        envelope = 1.0 - (i / sample_count)
+                        value = int(
+                            5000
+                            * envelope
+                            * math.sin(2 * math.pi * 440 * i / frequency)
+                        )
+                        samples.extend([value] * channels)
+                    self._hover_sound = pygame.mixer.Sound(buffer=samples.tobytes())
+        if self._hover_sound is not None:
+            self._hover_sound.play()
 
     # --- menu navigation ---
 
@@ -430,9 +453,11 @@ class TerminalUI:
                     self.set_transient("Game saved.", (80, 160, 255), duration_ms=1500)
             elif event.key == pygame.K_UP and self.options:
                 self.selected_index = (self.selected_index - 1) % len(self.options)
+                self._play_hover_sound()
                 self.notify_hover()
             elif event.key == pygame.K_DOWN and self.options:
                 self.selected_index = (self.selected_index + 1) % len(self.options)
+                self._play_hover_sound()
                 self.notify_hover()
             elif event.key == pygame.K_RETURN and self.options:
                 self.execute_selection()
@@ -442,6 +467,7 @@ class TerminalUI:
             for i, rect in enumerate(self.option_rects):
                 if rect.collidepoint(mx, my) and self.selected_index != i:
                     self.selected_index = i
+                    self._play_hover_sound()
                     self.notify_hover()
 
         elif (
@@ -706,11 +732,11 @@ class TerminalUI:
 
         if self.active_character:
             hud_y = rect.height - 80
-            if self.hosting_info:
-                code_lbl = self.font.render(
-                    f"Join code: {self.hosting_info}", True, TEXT_DIM
-                )
-                surface.blit(code_lbl, (rect.x + 20, hud_y - line_height * 2))
+            # if self.hosting_info:
+            # code_lbl = self.font.render(
+            #    f"Join code: {self.hosting_info}", True, TEXT_DIM
+            # )
+            # surface.blit(code_lbl, (rect.x + 20, hud_y - line_height * 2))
 
             hint_lbl = self.font.render("[Esc] Save & Quit to Menu", True, TEXT_DIM)
             surface.blit(hint_lbl, (rect.x + 20, hud_y - line_height))

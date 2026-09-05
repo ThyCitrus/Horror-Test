@@ -55,7 +55,7 @@ def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
 
 def main():
     pygame.init()
-    pygame.mixer.music.load("music/JiggyTime.wav")
+    pygame.mixer.music.load("music/Slow_Creepy_Strings.wav")
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption("Dungeon Crawler")
     clock = pygame.time.Clock()
