@@ -75,6 +75,9 @@ class GameServer:
         self._running = False
         self.pending_interacts = []
         self.doors_snapshot = {}
+        self.pending_pickups = []
+        self.pending_drops = []  # [(client_id, index), ...]
+        self.items_snapshot = {}
 
     def start(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -124,11 +127,26 @@ class GameServer:
                             if client_id in self.players:
                                 self.players[client_id]["dx"] = msg.get("dx", 0)
                                 self.players[client_id]["dy"] = msg.get("dy", 0)
+                    elif mtype == "turn" and client_id:
+                        with self._lock:
+                            if client_id in self.players:
+                                self.players[client_id]["facing"] = msg.get(
+                                    "facing", self.players[client_id]["facing"]
+                                )
                     elif mtype == "interact" and client_id:
                         with self._lock:
                             self.pending_interacts.append(
                                 (client_id, msg.get("x"), msg.get("y"))
                             )
+                    elif mtype == "pickup" and client_id:
+                        with self._lock:
+                            self.pending_pickups.append(
+                                (client_id, msg.get("x"), msg.get("y"))
+                            )
+                    elif mtype == "drop" and client_id:
+                        with self._lock:
+                            self.pending_drops.append((client_id, msg.get("index")))
+
         except (ConnectionError, OSError):
             pass
         finally:
@@ -206,6 +224,7 @@ class GameServer:
                 "dx": 0,
                 "dy": 0,
                 "socket": stream,
+                "items": [],
             }
             stream.send(
                 {
@@ -268,6 +287,34 @@ class GameServer:
         with self._lock:
             self.doors_snapshot = {f"{x},{y}": v for (x, y), v in doors.items()}
 
+    def consume_pending_pickups(self):
+        with self._lock:
+            items = self.pending_pickups
+            self.pending_pickups = []
+            return items
+
+    def consume_pending_drops(self):
+        with self._lock:
+            drops = self.pending_drops
+            self.pending_drops = []
+            return drops
+
+    def add_item_to_player(self, client_id, item_id):
+        with self._lock:
+            if client_id in self.players:
+                self.players[client_id]["items"].append(item_id)
+
+    def pop_item_from_player(self, client_id, index):
+        with self._lock:
+            p = self.players.get(client_id)
+            if not p or index is None or not (0 <= index < len(p["items"])):
+                return None
+            return p["items"].pop(index)
+
+    def set_items_snapshot(self, items):
+        with self._lock:
+            self.items_snapshot = {f"{x},{y}": v for (x, y), v in items.items()}
+
     # --- broadcast thread ---
 
     def _broadcast_loop(self):
@@ -283,6 +330,7 @@ class GameServer:
                         for cid, p in self.players.items()
                     },
                     "doors": self.doors_snapshot,
+                    "items": self.items_snapshot,
                 }
                 dead_sockets = []
                 for cid, p in self.players.items():
@@ -328,6 +376,9 @@ class GameClient:
     def send_input(self, dx: int, dy: int):
         self._stream.send({"type": "input", "dx": dx, "dy": dy})
 
+    def send_turn(self, facing):
+        self._stream.send({"type": "turn", "facing": facing})
+
     def poll_messages(self):
         """Non-blocking drain. Call once per frame; dispatch by msg['type']."""
         msgs = []
@@ -348,3 +399,9 @@ class GameClient:
 
     def send_interact(self, x, y):
         self._stream.send({"type": "interact", "x": x, "y": y})
+
+    def send_pickup(self, x, y):
+        self._stream.send({"type": "pickup", "x": x, "y": y})
+
+    def send_drop(self, index):
+        self._stream.send({"type": "drop", "index": index})

@@ -42,6 +42,7 @@ class TerminalUI:
         on_join_address=None,
         on_mp_color_confirm=None,
         on_multiplayer_quit=None,
+        on_drop_item=None,
     ):
         self.font = font
         self.bold_font = bold_font
@@ -86,6 +87,9 @@ class TerminalUI:
         self.network_mode = False
         self.mp_hud_player = None  # {"name", "color", "alive"} for guests only
         self.hosting_info = None
+        self.inventory_index = 0
+        self.current_inventory_items = []
+        self.on_drop_item = on_drop_item
 
         self.load_start_menu()
 
@@ -422,6 +426,22 @@ class TerminalUI:
                         self._confirm_mp_color_selection()
             return
 
+        if self.state == "INVENTORY":
+            if event.type == pygame.KEYDOWN:
+                count = len(self.current_inventory_items or [])
+                if count > 0:
+                    if event.key == pygame.K_UP:
+                        self.inventory_index = (self.inventory_index - 1) % count
+                    elif event.key == pygame.K_DOWN:
+                        self.inventory_index = (self.inventory_index + 1) % count
+                    elif event.key == pygame.K_BACKSPACE:
+                        if self.on_drop_item:
+                            self.on_drop_item(self.inventory_index)
+                        self.inventory_index = 0
+                if event.key == pygame.K_RETURN:
+                    self.return_to_playing()
+            return
+
         # 4. General key navigation
         if event.type == pygame.KEYDOWN:
             if (
@@ -546,6 +566,7 @@ class TerminalUI:
         elif self.state == "PLAYING":
             if sel == 0:
                 self.state = "INVENTORY"
+                self.inventory_index = 0
                 self.set_options(["Back"])
             elif sel == 1:
                 self.state = "MAP"
@@ -577,6 +598,8 @@ class TerminalUI:
         discovered=None,
         player_pos=None,
         other_players=None,
+        local_items=None,
+        interact_prompt=None,
     ):
         pygame.draw.rect(surface, PANEL_BG, rect)
         pygame.draw.line(surface, PANEL_DIVIDER, (rect.x, 0), (rect.x, rect.height), 2)
@@ -598,6 +621,11 @@ class TerminalUI:
                 y += line_height
             else:
                 self.transient_message = None
+
+        if interact_prompt and self.state in ("PLAYING", "INVENTORY", "MAP"):
+            prompt_lbl = self.font.render(interact_prompt, True, (255, 220, 120))
+            surface.blit(prompt_lbl, (rect.x + 20, y))
+            y += line_height
 
         if self.network_mode and self.state == "PLAYING" and other_players:
             y += 5
@@ -684,16 +712,32 @@ class TerminalUI:
             y += line_height + 5
 
         elif self.state == "INVENTORY":
-            items = self.active_character["items"] if self.active_character else []
-            if not items:
+            items_list = (
+                local_items
+                if local_items is not None
+                else (self.active_character["items"] if self.active_character else [])
+            )
+            self.current_inventory_items = items_list
+            if not items_list:
                 empty_lbl = self.font.render("(Empty)", True, TEXT_DIM)
                 surface.blit(empty_lbl, (rect.x + 20, y))
                 y += line_height
             else:
-                for item_name in items:
-                    item_lbl = self.font.render(f"- {item_name}", True, TEXT_WHITE)
+                for i, item_name in enumerate(items_list):
+                    prefix = " > " if i == self.inventory_index else "   "
+                    active_font = (
+                        self.bold_font if i == self.inventory_index else self.font
+                    )
+                    item_lbl = active_font.render(
+                        f"{prefix}{item_name}", True, TEXT_WHITE
+                    )
                     surface.blit(item_lbl, (rect.x + 20, y))
                     y += line_height
+                y += 5
+                hint_lbl = self.font.render(
+                    "[Up/Down] Select   [Backspace] Drop   [Enter] Back", True, TEXT_DIM
+                )
+                surface.blit(hint_lbl, (rect.x + 20, y))
             y += 10
 
         elif self.state == "MAP" and dungeon is not None and discovered is not None:
@@ -716,6 +760,7 @@ class TerminalUI:
             "MP_COLOR_SELECT",
             "CONNECTING",
             "JOINING",
+            "INVENTORY",
         ):
             for i, opt in enumerate(self.options):
                 color = self.option_colors[i]

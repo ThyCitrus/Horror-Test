@@ -1,5 +1,6 @@
 import math
 import random
+from collections import deque
 
 WALL = "#"
 FLOOR = "."
@@ -35,12 +36,22 @@ TILE_CHAR_MAP = {
     "|": DOOR,
     "_": DOOR,
 }
+ITEM_SPAWN_CHAR = "?"
 
 
 def parse_ascii_dungeon(ascii_str):
-    tiles, doors = {}, {}
+    """Converts a hand-drawn ASCII map into (tiles, doors, items).
+    tiles: {(x,y): WALL|FLOOR|LADDER|DOOR}
+    doors: {(x,y): {"orientation": "H"|"V", "animating": bool, ...}}
+    items: {(x,y): {"item_id": str}}  -- the tile underneath an item is FLOOR
+    """
+    tiles, doors, items = {}, {}, {}
     for y, line in enumerate(ascii_str.strip("\n").split("\n")):
         for x, ch in enumerate(line):
+            if ch == ITEM_SPAWN_CHAR:
+                tiles[(x, y)] = FLOOR
+                items[(x, y)] = {"item_id": "TestItem"}
+                continue
             tile = TILE_CHAR_MAP.get(ch)
             if tile is None:
                 continue
@@ -52,7 +63,7 @@ def parse_ascii_dungeon(ascii_str):
                     "anim_until": None,
                     "pending_orientation": None,
                 }
-    return tiles, doors
+    return tiles, doors, items
 
 
 def build_lobby_dungeon():
@@ -876,6 +887,32 @@ def find_adjacent_spawn(dungeon, px, py):
         if dungeon.get((nx, ny)) == FLOOR:
             return nx, ny
     return px, py
+
+
+def find_drop_position(dungeon, occupied, x, y, max_visited=200):
+    """Nearest walkable, unoccupied FLOOR tile to (x, y), reachable without
+    passing through walls. Never returns a DOOR tile — items don't stack on
+    doors. occupied is anything supporting `in` (a dict's keys work fine)."""
+    start = (x, y)
+    if dungeon.get(start) == FLOOR and start not in occupied:
+        return start
+
+    visited = {start}
+    frontier = deque([start])
+    while frontier and len(visited) < max_visited:
+        cx, cy = frontier.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            npos = (cx + dx, cy + dy)
+            if npos in visited:
+                continue
+            tile = dungeon.get(npos)
+            if tile not in (FLOOR, DOOR):
+                continue  # walls block traversal entirely
+            visited.add(npos)
+            if tile == FLOOR and npos not in occupied:
+                return npos
+            frontier.append(npos)  # keep exploring through doors, don't land there
+    return start  # degenerate fallback if truly nowhere valid nearby
 
 
 def print_dungeon(tiles):
