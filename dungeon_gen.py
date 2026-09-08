@@ -822,38 +822,45 @@ FOG_END_RADIUS = 7
 FOG_MIN_BRIGHTNESS = 0.05
 
 
-def get_fog_brightness(px, py, tx, ty):
-    dist = math.hypot(tx - px, ty - py)
+def get_fog_brightness(px, py, tx, ty, ellipse_y_ratio=1.0):
+    dx = tx - px
+    dy = (ty - py) / ellipse_y_ratio
+    dist = math.hypot(dx, dy)
 
     if dist <= FOG_START_RADIUS:
         return 1.0
     if dist >= FOG_END_RADIUS:
         return FOG_MIN_BRIGHTNESS
 
-    # Normalize distance to [0, 1] over [FOG_START_RADIUS, FOG_END_RADIUS]
     span = FOG_END_RADIUS - FOG_START_RADIUS
-    t = (dist - FOG_START_RADIUS) / span  # t in [0, 1]
+    t = (dist - FOG_START_RADIUS) / span
 
-    # Logarithmic-style falloff:
-    # Use log(1 + k*t) / log(1 + k) so that:
-    #   t = 0 -> factor = 0
-    #   t = 1 -> factor = 1
-    # Larger k => sharper drop near the start.
-    k = 6.0  # tweak this to adjust "sharpness"
+    k = 6.0
     factor = math.log(1 + k * t) / math.log(1 + k)
 
-    # Map factor from [0,1] to brightness from 1.0 down to FOG_MIN_BRIGHTNESS
     brightness = 1.0 - factor * (1.0 - FOG_MIN_BRIGHTNESS)
     return max(FOG_MIN_BRIGHTNESS, min(1.0, brightness))
 
 
-def compute_visible_tiles(dungeon, doors, px, py, radius=10):
+def compute_visible_tiles(
+    dungeon, doors, px, py, radius=10, light_cx=None, light_cy=None, ellipse_y_ratio=1.0
+):
+    if light_cx is None:
+        light_cx = px
+    if light_cy is None:
+        light_cy = py
+
+    scan_radius = (
+        int(radius) + 3
+    )  # padding so a shifted light center's far edge isn't clipped
     visible = set()
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            if dx * dx + dy * dy > radius * radius:
-                continue
+    for dy in range(-scan_radius, scan_radius + 1):
+        for dx in range(-scan_radius, scan_radius + 1):
             tx, ty = px + dx, py + dy
+            rel_x = tx - light_cx
+            rel_y = (ty - light_cy) / ellipse_y_ratio
+            if rel_x * rel_x + rel_y * rel_y > radius * radius:
+                continue
             if has_line_of_sight(dungeon, doors, px, py, tx, ty):
                 visible.add((tx, ty))
     visible.add((px, py))

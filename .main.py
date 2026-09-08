@@ -43,6 +43,16 @@ DIRECTION_KEYS = {
 }
 FACING_FOR_DELTA = {(0, -1): "^", (0, 1): "v", (-1, 0): "<", (1, 0): ">"}
 DELTA_FOR_FACING = {"^": (0, -1), "v": (0, 1), "<": (-1, 0), ">": (1, 0)}
+
+NAKED_EYE_FORWARD_SHIFT = (
+    1.4  # tiles the ambient light center leads your facing direction
+)
+NAKED_EYE_ELLIPSE_Y_RATIO = (
+    0.8  # <1 = wider than tall; tune toward 1.0 for rounder, lower for flatter
+)
+LIGHT_LERP_SPEED = 0.006  # tune: higher = snappier, lower = more trailing/smooth
+DOOR_INTERACTION_COYOTE_MS = 500
+
 TEXT_INPUT_STATES = {"NAME_INPUT", "ADDRESS_INPUT", "MP_NAME_INPUT"}
 INTERACT_KEY = pygame.K_e
 ITEM_GLYPH = "?"
@@ -311,9 +321,13 @@ def main():
     play_menu_music()
 
     visual_x, visual_y = float(player_x), float(player_y)
+    light_visual_x, light_visual_y = float(player_x), float(player_y)
     discovered = set()
+    last_door_interaction_pos = None
+    last_door_interaction_ms = 0
 
     pending_moves = {}
+    buffered_move = None
     time_since_last_move = 0
     last_diagonal_axis = None
 
@@ -376,6 +390,7 @@ def main():
                 terminal.handle_input(event)
             elif event.type == pygame.KEYDOWN and event.key in DIRECTION_KEYS:
                 pending_moves[event.key] = now
+                buffered_move = event.key
             elif event.type == pygame.KEYUP and event.key in pending_moves:
                 del pending_moves[event.key]
             elif (
@@ -411,6 +426,21 @@ def main():
                         door = materialize_door(dungeon, doors, *pos)
                         begin_door_toggle(door, pygame.time.get_ticks())
                     break
+                elif (
+                    last_door_interaction_pos is not None
+                    and now - last_door_interaction_ms <= DOOR_INTERACTION_COYOTE_MS
+                    and dungeon.get(last_door_interaction_pos) == DOOR
+                ):
+                    # Keep the most recently faced door usable briefly after
+                    # the player turns away or steps out of its interact tile.
+                    if terminal.network_mode:
+                        net_client.send_interact(*last_door_interaction_pos)
+                    else:
+                        door = materialize_door(
+                            dungeon, doors, *last_door_interaction_pos
+                        )
+                        begin_door_toggle(door, pygame.time.get_ticks())
+                    break
             else:
                 terminal.handle_input(event)
 
@@ -441,8 +471,10 @@ def main():
             candidates = [
                 (pending_moves.get(k, now), k) for k in DIRECTION_KEYS if keys[k]
             ]
+            chosen_key = buffered_move
+            buffered_move = None
 
-            if candidates:
+            if chosen_key is None and candidates:
                 held_keys = [k for _, k in candidates if keys[k]]
 
                 horiz = next(
@@ -464,6 +496,7 @@ def main():
                     _, chosen_key = candidates[0]
                     last_diagonal_axis = None
 
+            if chosen_key is not None:
                 (dx, dy), glyph = DIRECTION_KEYS[chosen_key]
 
                 if terminal.network_mode:
@@ -578,8 +611,38 @@ def main():
                 interact_prompt = f"[E] Pick up {name}"
             elif dungeon.get(face_pos) == DOOR:
                 interact_prompt = "[E] Open/close door"
+                last_door_interaction_pos = face_pos
+                last_door_interaction_ms = now
 
-        visible_tiles = compute_visible_tiles(dungeon, doors, px, py, radius=10)
+        if (
+            last_door_interaction_pos is not None
+            and now - last_door_interaction_ms > DOOR_INTERACTION_COYOTE_MS
+        ):
+            last_door_interaction_pos = None
+
+        shift_dx, shift_dy = DELTA_FOR_FACING.get(display_facing, (0, 1))
+        target_light_x = px + shift_dx * NAKED_EYE_FORWARD_SHIFT
+        target_light_y = py + shift_dy * NAKED_EYE_FORWARD_SHIFT
+
+        light_visual_x += (target_light_x - light_visual_x) * min(
+            1.0, dt * LIGHT_LERP_SPEED
+        )
+        light_visual_y += (target_light_y - light_visual_y) * min(
+            1.0, dt * LIGHT_LERP_SPEED
+        )
+
+        light_cx, light_cy = light_visual_x, light_visual_y
+
+        visible_tiles = compute_visible_tiles(
+            dungeon,
+            doors,
+            px,
+            py,
+            radius=10,
+            light_cx=light_cx,
+            light_cy=light_cy,
+            ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO,
+        )
         visible_tiles = reveal_boundary_walls(dungeon, doors, visible_tiles)
         discovered.update(visible_tiles)
         for enemy in enemies:
@@ -612,7 +675,11 @@ def main():
                 if should_stretch
                 else None
             )
-            brightness = get_fog_brightness(px, py, wx, wy)
+            brightness = get_fog_brightness(
+                light_cx, light_cy, wx, wy, ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO
+            )
+            # Darken distant tiles more aggressively so the fog fades faster.
+            brightness = brightness**2.5
 
             dist = math.hypot(wx - px, wy - py)
 
@@ -704,7 +771,13 @@ def main():
                     continue
                 gcx = offset_x + rel_x * cell_spacing_x
                 gcy = offset_y + rel_y * cell_spacing_y
-                brightness = get_fog_brightness(px, py, p["x"], p["y"])
+                brightness = get_fog_brightness(
+                    light_cx,
+                    light_cy,
+                    p["x"],
+                    p["y"],
+                    ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO,
+                )
                 base_color = (
                     tuple(map(int, p["color"].split()))
                     if p.get("alive", True)
