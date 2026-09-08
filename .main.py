@@ -51,10 +51,11 @@ NAKED_EYE_ELLIPSE_Y_RATIO = (
     0.8  # <1 = wider than tall; tune toward 1.0 for rounder, lower for flatter
 )
 LIGHT_LERP_SPEED = 0.006  # tune: higher = snappier, lower = more trailing/smooth
-DOOR_INTERACTION_COYOTE_MS = 500
 
 TEXT_INPUT_STATES = {"NAME_INPUT", "ADDRESS_INPUT", "MP_NAME_INPUT"}
 INTERACT_KEY = pygame.K_e
+DOOR_INTERACT_RANGE = 2
+DOOR_COYOTE_TIME_MS = 500
 ITEM_GLYPH = "?"
 ITEM_COLOR = (230, 200, 60)
 ITEM_NAMES = {"TestItem": "Test Item"}  # item_id -> display name, falls back to item_id
@@ -97,6 +98,8 @@ def main():
     )  # client_id -> {x,y,visual_x,visual_y,facing,color,name,alive,connected}
     doors = {}  # (x,y) -> {"state": "closed"|"opening"|"open", "anim_start": timestamp}
     items = {}
+    last_door_target = None
+    last_door_target_time = 0
 
     def handle_slot_hover(slot_info, get_current=False):
         nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors, items
@@ -323,9 +326,6 @@ def main():
     visual_x, visual_y = float(player_x), float(player_y)
     light_visual_x, light_visual_y = float(player_x), float(player_y)
     discovered = set()
-    last_door_interaction_pos = None
-    last_door_interaction_ms = 0
-
     pending_moves = {}
     buffered_move = None
     time_since_last_move = 0
@@ -383,6 +383,27 @@ def main():
         elif terminal.state in ("COLOR_SELECT", "CLASS_SELECT"):
             player_color = tuple(map(int, terminal.creation_color.split()))
 
+        # --- update nearby door for coyote-time tracking ---
+        if terminal.network_mode and local_client_id in players:
+            check_x = players[local_client_id]["x"]
+            check_y = players[local_client_id]["y"]
+            check_facing = players[local_client_id]["facing"]
+        else:
+            check_x, check_y = player_x, player_y
+            check_facing = player_facing
+
+        cdx, cdy = DELTA_FOR_FACING.get(check_facing, (0, 1))
+        front_tile = (check_x + cdx, check_y + cdy)
+        extended_tile = (check_x + 2 * cdx, check_y + 2 * cdy)
+        # Keep the nearest door as the coyote-time target, while retaining
+        # the two-tile interaction leniency when no adjacent door is present.
+        if dungeon.get(front_tile) == DOOR:
+            last_door_target = front_tile
+            last_door_target_time = now
+        elif dungeon.get(extended_tile) == DOOR:
+            last_door_target = extended_tile
+            last_door_target_time = now
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -408,6 +429,7 @@ def main():
 
                 ddx, ddy = DELTA_FOR_FACING.get(facing, (0, 1))
                 pos = (interact_x + ddx, interact_y + ddy)
+                extended_pos = (interact_x + 2 * ddx, interact_y + 2 * ddy)
 
                 if pos in items:
                     if terminal.network_mode:
@@ -419,28 +441,25 @@ def main():
                             terminal.active_character,
                             slot_path(terminal.active_character["slot"]),
                         )
-                elif dungeon.get(pos) == DOOR:
-                    if terminal.network_mode:
-                        net_client.send_interact(*pos)
-                    else:
-                        door = materialize_door(dungeon, doors, *pos)
-                        begin_door_toggle(door, pygame.time.get_ticks())
-                    break
-                elif (
-                    last_door_interaction_pos is not None
-                    and now - last_door_interaction_ms <= DOOR_INTERACTION_COYOTE_MS
-                    and dungeon.get(last_door_interaction_pos) == DOOR
-                ):
-                    # Keep the most recently faced door usable briefly after
-                    # the player turns away or steps out of its interact tile.
-                    if terminal.network_mode:
-                        net_client.send_interact(*last_door_interaction_pos)
-                    else:
-                        door = materialize_door(
-                            dungeon, doors, *last_door_interaction_pos
-                        )
-                        begin_door_toggle(door, pygame.time.get_ticks())
-                    break
+                else:
+                    target_door = None
+                    if dungeon.get(pos) == DOOR:
+                        target_door = pos
+                    elif dungeon.get(extended_pos) == DOOR:
+                        target_door = extended_pos
+                    elif (
+                        last_door_target is not None
+                        and now - last_door_target_time <= DOOR_COYOTE_TIME_MS
+                        and dungeon.get(last_door_target) == DOOR
+                    ):
+                        target_door = last_door_target
+
+                    if target_door is not None:
+                        if terminal.network_mode:
+                            net_client.send_interact(*target_door)
+                        else:
+                            door = materialize_door(dungeon, doors, *target_door)
+                            begin_door_toggle(door, pygame.time.get_ticks())
             else:
                 terminal.handle_input(event)
 
@@ -514,6 +533,13 @@ def main():
             net_server.set_items_snapshot(items)
             for cid, ix, iy in net_server.consume_pending_interacts():
                 if dungeon.get((ix, iy)) != DOOR:
+                    continue
+                player_state = net_server.get_players_snapshot().get(cid)
+                if (
+                    player_state
+                    and abs(player_state["x"] - ix) + abs(player_state["y"] - iy)
+                    > DOOR_INTERACT_RANGE + 1
+                ):
                     continue
                 door = materialize_door(dungeon, doors, ix, iy)
                 begin_door_toggle(door, pygame.time.get_ticks())
@@ -611,14 +637,6 @@ def main():
                 interact_prompt = f"[E] Pick up {name}"
             elif dungeon.get(face_pos) == DOOR:
                 interact_prompt = "[E] Open/close door"
-                last_door_interaction_pos = face_pos
-                last_door_interaction_ms = now
-
-        if (
-            last_door_interaction_pos is not None
-            and now - last_door_interaction_ms > DOOR_INTERACTION_COYOTE_MS
-        ):
-            last_door_interaction_pos = None
 
         shift_dx, shift_dy = DELTA_FOR_FACING.get(display_facing, (0, 1))
         target_light_x = px + shift_dx * NAKED_EYE_FORWARD_SHIFT
@@ -688,7 +706,7 @@ def main():
                 dir_x, dir_y = dx / dist, dy / dist
 
                 base_wall_color = (
-                    WALL_COLOR if (is_wall_like or char == DOOR) else FLOOR_COLOR
+                    WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
                 )
                 base_cx = offset_x + (wx - camera_start_x) * cell_spacing_x
                 base_cy = offset_y + (wy - camera_start_y) * cell_spacing_y
@@ -716,12 +734,11 @@ def main():
                         (dist - i * 0.1, draw_char, seg_color, rect_center, font_size)
                     )
             else:
-                if (wx, wy) in items and char != DOOR:
-                    base_tile_color = ITEM_COLOR
-                else:
-                    base_tile_color = (
-                        WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
-                    )
+                base_tile_color = (
+                    ITEM_COLOR
+                    if (wx, wy) in items
+                    else WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
+                )
                 color = tuple(int(c * brightness) for c in base_tile_color)
                 cx = offset_x + (wx - camera_start_x) * cell_spacing_x
                 cy = offset_y + (wy - camera_start_y) * cell_spacing_y
