@@ -203,6 +203,8 @@ class TerminalUI:
             "max_hp": 100,
             "gold": 0,
             "items": [],
+            "equipped_light": None,
+            "light_on": False,
         }
         save_json(character, slot_path(self.creation_slot))
         self.active_character = character

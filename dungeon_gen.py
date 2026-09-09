@@ -19,8 +19,8 @@ TILE_CHAR_MAP = {
     "#": WALL,
     ".": FLOOR,
     "‡": LADDER,
-    "|": FLOOR,  # TODO: door placeholder — walkable until door mechanics exist
-    "_": FLOOR,  # TODO: door placeholder — walkable until door mechanics exist
+    "|": FLOOR,
+    "_": FLOOR,
 }
 
 WHITE = (255, 255, 255)
@@ -36,7 +36,7 @@ TILE_CHAR_MAP = {
     "|": DOOR,
     "_": DOOR,
 }
-ITEM_SPAWN_CHAR = "?"
+ITEM_SPAWN_CHARS = {"?": "TestItem", "F": "Flashlight", "L": "Lantern"}
 
 
 def parse_ascii_dungeon(ascii_str):
@@ -48,9 +48,9 @@ def parse_ascii_dungeon(ascii_str):
     tiles, doors, items = {}, {}, {}
     for y, line in enumerate(ascii_str.strip("\n").split("\n")):
         for x, ch in enumerate(line):
-            if ch == ITEM_SPAWN_CHAR:
+            if ch in ITEM_SPAWN_CHARS:
                 tiles[(x, y)] = FLOOR
-                items[(x, y)] = {"item_id": "TestItem"}
+                items[(x, y)] = {"item_id": ITEM_SPAWN_CHARS[ch]}
                 continue
             tile = TILE_CHAR_MAP.get(ch)
             if tile is None:
@@ -842,26 +842,70 @@ def get_fog_brightness(px, py, tx, ty, ellipse_y_ratio=1.0):
     return max(FOG_MIN_BRIGHTNESS, min(1.0, brightness))
 
 
+def get_light_brightness(
+    px,
+    py,
+    tx,
+    ty,
+    plateau_radius,
+    falloff_end_radius,
+    min_brightness=0.0,
+    ellipse_y_ratio=1.0,
+):
+    dx = tx - px
+    dy = (ty - py) / ellipse_y_ratio
+    dist = math.hypot(dx, dy)
+    if dist <= plateau_radius:
+        return 1.0
+    if dist >= falloff_end_radius:
+        return min_brightness
+    span = falloff_end_radius - plateau_radius
+    t = (dist - plateau_radius) / span
+    factor = (
+        t**1.5
+    )  # gentler than ambient's log curve — light sources shouldn't die harshly
+    return max(min_brightness, 1.0 - factor * (1.0 - min_brightness))
+
+
 def compute_visible_tiles(
-    dungeon, doors, px, py, radius=10, light_cx=None, light_cy=None, ellipse_y_ratio=1.0
+    dungeon,
+    doors,
+    px,
+    py,
+    radius=10,
+    light_cx=None,
+    light_cy=None,
+    ellipse_y_ratio=1.0,
+    cone_angle=None,
+    cone_half_angle=None,
+    cone_range=None,
+    close_radius=1,
 ):
     if light_cx is None:
         light_cx = px
     if light_cy is None:
         light_cy = py
 
-    scan_radius = (
-        int(radius) + 3
-    )  # padding so a shifted light center's far edge isn't clipped
+    scan_radius = int(max(radius, cone_range or 0)) + 3
     visible = set()
     for dy in range(-scan_radius, scan_radius + 1):
         for dx in range(-scan_radius, scan_radius + 1):
             tx, ty = px + dx, py + dy
-            rel_x = tx - light_cx
-            rel_y = (ty - light_cy) / ellipse_y_ratio
-            if rel_x * rel_x + rel_y * rel_y > radius * radius:
-                continue
-            if has_line_of_sight(dungeon, doors, px, py, tx, ty):
+            in_light = math.hypot(tx - px, ty - py) <= close_radius
+
+            if not in_light and cone_angle is not None:
+                rel_x, rel_y = tx - light_cx, ty - light_cy
+                dist = math.hypot(rel_x, rel_y)
+                if dist <= cone_range:
+                    ang = math.atan2(rel_y, rel_x)
+                    diff = abs((ang - cone_angle + math.pi) % (2 * math.pi) - math.pi)
+                    in_light = diff <= cone_half_angle
+            elif not in_light:
+                rel_x = tx - light_cx
+                rel_y = (ty - light_cy) / ellipse_y_ratio
+                in_light = rel_x * rel_x + rel_y * rel_y <= radius * radius
+
+            if in_light and has_line_of_sight(dungeon, doors, px, py, tx, ty):
                 visible.add((tx, ty))
     visible.add((px, py))
     return visible

@@ -133,6 +133,10 @@ class GameServer:
                                 self.players[client_id]["facing"] = msg.get(
                                     "facing", self.players[client_id]["facing"]
                                 )
+                                self.players[client_id]["look_angle"] = msg.get(
+                                    "look_angle",
+                                    self.players[client_id].get("look_angle", 0.0),
+                                )
                     elif mtype == "interact" and client_id:
                         with self._lock:
                             self.pending_interacts.append(
@@ -146,6 +150,12 @@ class GameServer:
                     elif mtype == "drop" and client_id:
                         with self._lock:
                             self.pending_drops.append((client_id, msg.get("index")))
+                    elif mtype == "toggle_light" and client_id:
+                        with self._lock:
+                            if client_id in self.players:
+                                self.players[client_id]["light_on"] = not self.players[
+                                    client_id
+                                ]["light_on"]
 
         except (ConnectionError, OSError):
             pass
@@ -223,8 +233,11 @@ class GameServer:
                 "connected": True,
                 "dx": 0,
                 "dy": 0,
+                "look_angle": 0.0,
                 "socket": stream,
                 "items": [],
+                "equipped_light": None,
+                "light_on": False,
             }
             stream.send(
                 {
@@ -304,6 +317,11 @@ class GameServer:
             if client_id in self.players:
                 self.players[client_id]["items"].append(item_id)
 
+    def set_equipped_light(self, client_id, item_id):
+        with self._lock:
+            if client_id in self.players:
+                self.players[client_id]["equipped_light"] = item_id
+
     def pop_item_from_player(self, client_id, index):
         with self._lock:
             p = self.players.get(client_id)
@@ -376,8 +394,10 @@ class GameClient:
     def send_input(self, dx: int, dy: int):
         self._stream.send({"type": "input", "dx": dx, "dy": dy})
 
-    def send_turn(self, facing):
-        self._stream.send({"type": "turn", "facing": facing})
+    def send_turn(self, facing, look_angle=0.0):
+        self._stream.send(
+            {"type": "turn", "facing": facing, "look_angle": look_angle}
+        )
 
     def poll_messages(self):
         """Non-blocking drain. Call once per frame; dispatch by msg['type']."""
@@ -405,3 +425,6 @@ class GameClient:
 
     def send_drop(self, index):
         self._stream.send({"type": "drop", "index": index})
+
+    def send_toggle_light(self):
+        self._stream.send({"type": "toggle_light"})

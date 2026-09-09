@@ -10,6 +10,7 @@ from dungeon_gen import (
     compute_visible_tiles,
     reveal_boundary_walls,
     get_fog_brightness,
+    get_light_brightness,
     find_adjacent_spawn,
     LOBBY_SEED,
     build_lobby_dungeon,
@@ -58,7 +59,26 @@ DOOR_INTERACT_RANGE = 2
 DOOR_COYOTE_TIME_MS = 500
 ITEM_GLYPH = "?"
 ITEM_COLOR = (230, 200, 60)
-ITEM_NAMES = {"TestItem": "Test Item"}  # item_id -> display name, falls back to item_id
+LIGHT_ITEM_IDS = {"Flashlight", "Lantern"}
+ITEM_NAMES = {
+    "TestItem": "Test Item",
+    "Flashlight": "Flashlight",
+    "Lantern": "Lantern",
+}  # item_id -> display name, falls back to item_id
+TOGGLE_LIGHT_KEY = pygame.BUTTON_LEFT
+LOOK_SEND_INTERVAL_MS = (
+    100  # throttle for continuous angle sync, separate from discrete facing changes
+)
+FLASHLIGHT_RANGE = 13
+FLASHLIGHT_PLATEAU = 7
+FLASHLIGHT_HALF_ANGLE_DEG = 30
+FLASHLIGHT_FLARE_DEG = 12
+FLASHLIGHT_CLOSE_RADIUS = 1
+FLASHLIGHT_MIN_BRIGHTNESS = 0.35
+LANTERN_PLATEAU = 1
+LANTERN_FALLOFF_END = 7
+LANTERN_MIN_BRIGHTNESS = 0.0
+LANTERN_RADIUS_BONUS = 3
 
 
 def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
@@ -66,6 +86,12 @@ def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
     if dist <= 0 or dist > max_range:
         return None
     return 1.0 - (dist - 1) / max_range
+
+
+def make_light_brightness_fn(cx, cy, plateau, falloff_end, min_brightness):
+    return lambda tx, ty: get_light_brightness(
+        cx, cy, tx, ty, plateau, falloff_end, min_brightness
+    )
 
 
 def main():
@@ -220,6 +246,9 @@ def main():
                     "alive": pdata["alive"],
                     "connected": pdata["connected"],
                     "items": list(pdata.get("items", [])),
+                    "equipped_light": pdata.get("equipped_light"),
+                    "light_on": pdata.get("light_on", False),
+                    "look_angle": pdata.get("look_angle", 0.0),
                 }
             else:
                 p = players[cid]
@@ -231,6 +260,10 @@ def main():
                 p["alive"] = pdata["alive"]
                 p["connected"] = pdata["connected"]
                 p["items"] = list(pdata.get("items", []))
+                p["equipped_light"] = pdata.get("equipped_light")
+                if cid != local_client_id:
+                    p["light_on"] = pdata.get("light_on", False)
+                    p["look_angle"] = pdata.get("look_angle", 0.0)
 
     def handle_network_message(msg):
         nonlocal dungeon, doors, items
@@ -257,6 +290,8 @@ def main():
                     "alive": True,
                     "connected": True,
                     "items": [],
+                    "equipped_light": None,
+                    "light_on": False,
                 }
                 terminal.enter_multiplayer_playing(you["name"], you["color"])
             elif terminal.state == "CONNECTING":
@@ -277,6 +312,9 @@ def main():
                 "alive": True,
                 "connected": True,
                 "items": [],
+                "equipped_light": None,
+                "light_on": False,
+                "look_angle": look_angle,
             }
             if is_host:
                 net_server.update_player_position(
@@ -325,6 +363,7 @@ def main():
 
     visual_x, visual_y = float(player_x), float(player_y)
     light_visual_x, light_visual_y = float(player_x), float(player_y)
+    last_look_send_time = 0
     discovered = set()
     pending_moves = {}
     buffered_move = None
@@ -368,13 +407,16 @@ def main():
             mouse_facing = ">"
 
         if terminal.network_mode:
-            if (
-                local_client_id in players
-                and players[local_client_id]["facing"] != mouse_facing
-            ):
-                players[local_client_id]["facing"] = mouse_facing
-                if net_client:
-                    net_client.send_turn(mouse_facing)
+            if local_client_id in players:
+                players[local_client_id]["look_angle"] = look_angle
+                facing_changed = players[local_client_id]["facing"] != mouse_facing
+                if facing_changed:
+                    players[local_client_id]["facing"] = mouse_facing
+                if net_client and (
+                    facing_changed or now - last_look_send_time >= LOOK_SEND_INTERVAL_MS
+                ):
+                    net_client.send_turn(mouse_facing, look_angle)
+                    last_look_send_time = now
         else:
             player_facing = mouse_facing
 
@@ -436,7 +478,10 @@ def main():
                         net_client.send_pickup(*pos)
                     else:
                         item = items.pop(pos)
-                        terminal.active_character["items"].append(item["item_id"])
+                        item_id = item["item_id"]
+                        terminal.active_character["items"].append(item_id)
+                        if item_id in LIGHT_ITEM_IDS:
+                            terminal.active_character["equipped_light"] = item_id
                         save_json(
                             terminal.active_character,
                             slot_path(terminal.active_character["slot"]),
@@ -460,6 +505,28 @@ def main():
                         else:
                             door = materialize_door(dungeon, doors, *target_door)
                             begin_door_toggle(door, pygame.time.get_ticks())
+            elif (
+                event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == TOGGLE_LIGHT_KEY
+                and terminal.state in ("PLAYING", "INVENTORY", "MAP")
+            ):
+                if terminal.network_mode and local_client_id in players:
+                    if players[local_client_id].get("equipped_light"):
+                        players[local_client_id]["light_on"] = not players[
+                            local_client_id
+                        ]["light_on"]
+                        if net_client:
+                            net_client.send_toggle_light()
+                elif terminal.active_character and terminal.active_character.get(
+                    "equipped_light"
+                ):
+                    terminal.active_character["light_on"] = (
+                        not terminal.active_character["light_on"]
+                    )
+                    save_json(
+                        terminal.active_character,
+                        slot_path(terminal.active_character["slot"]),
+                    )
             else:
                 terminal.handle_input(event)
 
@@ -547,7 +614,10 @@ def main():
                 pos = (ix, iy)
                 if pos in items:
                     item = items.pop(pos)
-                    net_server.add_item_to_player(cid, item["item_id"])
+                    item_id = item["item_id"]
+                    net_server.add_item_to_player(cid, item_id)
+                    if item_id in LIGHT_ITEM_IDS:
+                        net_server.set_equipped_light(cid, item_id)
             for cid, index in net_server.consume_pending_drops():
                 snap = net_server.get_players_snapshot().get(cid)
                 if not snap:
@@ -638,6 +708,34 @@ def main():
             elif dungeon.get(face_pos) == DOOR:
                 interact_prompt = "[E] Open/close door"
 
+            if terminal.network_mode and local_client_id in players:
+                equipped_light = players[local_client_id].get("equipped_light")
+                light_on = players[local_client_id].get("light_on", False)
+            elif terminal.active_character:
+                equipped_light = terminal.active_character.get("equipped_light")
+                light_on = terminal.active_character.get("light_on", False)
+            else:
+                equipped_light = None
+                light_on = False
+            if equipped_light:
+                state = "ON" if light_on else "off"
+                light_line = f"[Left Click] {ITEM_NAMES.get(equipped_light, equipped_light)}: {state}"
+                interact_prompt = (
+                    f"{interact_prompt}   {light_line}"
+                    if interact_prompt
+                    else light_line
+                )
+
+        if terminal.network_mode and local_client_id in players:
+            equipped_light = players[local_client_id].get("equipped_light")
+            light_on = players[local_client_id].get("light_on", False)
+        elif terminal.active_character:
+            equipped_light = terminal.active_character.get("equipped_light")
+            light_on = terminal.active_character.get("light_on", False)
+        else:
+            equipped_light = None
+            light_on = False
+
         shift_dx, shift_dy = DELTA_FOR_FACING.get(display_facing, (0, 1))
         target_light_x = px + shift_dx * NAKED_EYE_FORWARD_SHIFT
         target_light_y = py + shift_dy * NAKED_EYE_FORWARD_SHIFT
@@ -649,19 +747,145 @@ def main():
             1.0, dt * LIGHT_LERP_SPEED
         )
 
-        light_cx, light_cy = light_visual_x, light_visual_y
-
-        visible_tiles = compute_visible_tiles(
+        # --- ambient (naked eye) vision: always active, private per-player ---
+        ambient_visible = compute_visible_tiles(
             dungeon,
             doors,
             px,
             py,
             radius=10,
-            light_cx=light_cx,
-            light_cy=light_cy,
+            light_cx=light_visual_x,
+            light_cy=light_visual_y,
             ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO,
         )
+
+        # --- physical light sources: shared, additive, visible to everyone ---
+        light_sources = []
+        if equipped_light == "Flashlight" and light_on:
+            light_sources.append(
+                {
+                    "visible": compute_visible_tiles(
+                        dungeon,
+                        doors,
+                        px,
+                        py,
+                        light_cx=px,
+                        light_cy=py,
+                        cone_angle=look_angle,
+                        cone_half_angle=math.radians(FLASHLIGHT_HALF_ANGLE_DEG),
+                        cone_range=FLASHLIGHT_RANGE,
+                        close_radius=FLASHLIGHT_CLOSE_RADIUS,
+                    ),
+                    "brightness_fn": make_light_brightness_fn(
+                        px,
+                        py,
+                        FLASHLIGHT_PLATEAU,
+                        FLASHLIGHT_RANGE,
+                        FLASHLIGHT_MIN_BRIGHTNESS,
+                    ),
+                }
+            )
+        elif equipped_light == "Lantern" and light_on:
+            light_sources.append(
+                {
+                    "visible": compute_visible_tiles(
+                        dungeon,
+                        doors,
+                        px,
+                        py,
+                        radius=LANTERN_FALLOFF_END,
+                        light_cx=px,
+                        light_cy=py,
+                    ),
+                    "brightness_fn": make_light_brightness_fn(
+                        px,
+                        py,
+                        LANTERN_PLATEAU,
+                        LANTERN_FALLOFF_END,
+                        LANTERN_MIN_BRIGHTNESS,
+                    ),
+                }
+            )
+
+        if terminal.network_mode:
+            for cid, p in players.items():
+                if (
+                    cid == local_client_id
+                    or not p.get("connected", True)
+                    or not p.get("alive", True)
+                ):
+                    continue
+                if not (p.get("light_on") and p.get("equipped_light")):
+                    continue
+                ox, oy = p["x"], p["y"]
+                if p["equipped_light"] == "Flashlight":
+                    light_sources.append(
+                        {
+                            "visible": compute_visible_tiles(
+                                dungeon,
+                                doors,
+                                ox,
+                                oy,
+                                light_cx=ox,
+                                light_cy=oy,
+                                cone_angle=p.get("look_angle", 0.0),
+                                cone_half_angle=math.radians(FLASHLIGHT_HALF_ANGLE_DEG),
+                                cone_flare=math.radians(FLASHLIGHT_FLARE_DEG),
+                                cone_range=FLASHLIGHT_RANGE,
+                                close_radius=FLASHLIGHT_CLOSE_RADIUS,
+                            ),
+                            "brightness_fn": make_light_brightness_fn(
+                                ox,
+                                oy,
+                                FLASHLIGHT_PLATEAU,
+                                FLASHLIGHT_RANGE,
+                                FLASHLIGHT_MIN_BRIGHTNESS,
+                            ),
+                        }
+                    )
+                elif p["equipped_light"] == "Lantern":
+                    light_sources.append(
+                        {
+                            "visible": compute_visible_tiles(
+                                dungeon,
+                                doors,
+                                ox,
+                                oy,
+                                radius=LANTERN_FALLOFF_END,
+                                light_cx=ox,
+                                light_cy=oy,
+                            ),
+                            "brightness_fn": make_light_brightness_fn(
+                                ox,
+                                oy,
+                                LANTERN_PLATEAU,
+                                LANTERN_FALLOFF_END,
+                                LANTERN_MIN_BRIGHTNESS,
+                            ),
+                        }
+                    )
+
+        visible_tiles = ambient_visible
+        for src in light_sources:
+            visible_tiles = visible_tiles | src["visible"]
         visible_tiles = reveal_boundary_walls(dungeon, doors, visible_tiles)
+
+        def tile_brightness(tx, ty):
+            best = (
+                get_fog_brightness(
+                    light_visual_x,
+                    light_visual_y,
+                    tx,
+                    ty,
+                    ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO,
+                )
+                ** 2.5
+            )
+            for src in light_sources:
+                if (tx, ty) in src["visible"]:
+                    best = max(best, src["brightness_fn"](tx, ty))
+            return best
+
         discovered.update(visible_tiles)
         for enemy in enemies:
             enemy.update(dt, dungeon, px, py, WALL)
@@ -693,11 +917,7 @@ def main():
                 if should_stretch
                 else None
             )
-            brightness = get_fog_brightness(
-                light_cx, light_cy, wx, wy, ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO
-            )
-            # Darken distant tiles more aggressively so the fog fades faster.
-            brightness = brightness**2.5
+            brightness = tile_brightness(wx, wy)
 
             dist = math.hypot(wx - px, wy - py)
 
@@ -788,13 +1008,7 @@ def main():
                     continue
                 gcx = offset_x + rel_x * cell_spacing_x
                 gcy = offset_y + rel_y * cell_spacing_y
-                brightness = get_fog_brightness(
-                    light_cx,
-                    light_cy,
-                    p["x"],
-                    p["y"],
-                    ellipse_y_ratio=NAKED_EYE_ELLIPSE_Y_RATIO,
-                )
+                brightness = tile_brightness(p["x"], p["y"])
                 base_color = (
                     tuple(map(int, p["color"].split()))
                     if p.get("alive", True)
