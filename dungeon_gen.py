@@ -67,21 +67,9 @@ def parse_ascii_dungeon(ascii_str):
 
 
 def build_lobby_dungeon():
-    """Load and parse the lobby map without requiring a specific export name."""
-    import lobby as lobby_module
+    from lobby import test_lobby
 
-    lobby_data = getattr(lobby_module, "lobby", None)
-    if lobby_data is None:
-        lobby_data = getattr(lobby_module, "LOBBY", None)
-    if lobby_data is None:
-        raise ImportError("lobby.py does not define a 'lobby' or 'LOBBY' map")
-
-    # The map may be exported directly as a string or wrapped in a sequence.
-    if isinstance(lobby_data, str):
-        ascii_map = lobby_data
-    else:
-        ascii_map = lobby_data[0]
-    return parse_ascii_dungeon(ascii_map)
+    return parse_ascii_dungeon(test_lobby[0])
 
 
 def _infer_door_orientation(dungeon, x, y):
