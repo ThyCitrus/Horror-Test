@@ -760,10 +760,28 @@ def main():
         )
 
         # --- physical light sources: shared, additive, visible to everyone ---
+        def filter_light_visibility(source_x, source_y, tiles):
+            filtered = set()
+            for target_x, target_y in tiles:
+                dx = target_x - source_x
+                dy = target_y - source_y
+                steps = max(abs(dx), abs(dy))
+                blocked = False
+                for step in range(1, steps):
+                    check_x = round(source_x + dx * step / steps)
+                    check_y = round(source_y + dy * step / steps)
+                    if dungeon.get((check_x, check_y), WALL) == WALL:
+                        blocked = True
+                        break
+                if not blocked:
+                    filtered.add((target_x, target_y))
+            return filtered
+
         light_sources = []
         if equipped_light == "Flashlight" and light_on:
             light_sources.append(
                 {
+                    "origin": (px, py),
                     "visible": compute_visible_tiles(
                         dungeon,
                         doors,
@@ -788,6 +806,7 @@ def main():
         elif equipped_light == "Lantern" and light_on:
             light_sources.append(
                 {
+                    "origin": (px, py),
                     "visible": compute_visible_tiles(
                         dungeon,
                         doors,
@@ -821,6 +840,7 @@ def main():
                 if p["equipped_light"] == "Flashlight":
                     light_sources.append(
                         {
+                            "origin": (ox, oy),
                             "visible": compute_visible_tiles(
                                 dungeon,
                                 doors,
@@ -830,7 +850,6 @@ def main():
                                 light_cy=oy,
                                 cone_angle=p.get("look_angle", 0.0),
                                 cone_half_angle=math.radians(FLASHLIGHT_HALF_ANGLE_DEG),
-                                cone_flare=math.radians(FLASHLIGHT_FLARE_DEG),
                                 cone_range=FLASHLIGHT_RANGE,
                                 close_radius=FLASHLIGHT_CLOSE_RADIUS,
                             ),
@@ -846,6 +865,7 @@ def main():
                 elif p["equipped_light"] == "Lantern":
                     light_sources.append(
                         {
+                            "origin": (ox, oy),
                             "visible": compute_visible_tiles(
                                 dungeon,
                                 doors,
@@ -864,6 +884,11 @@ def main():
                             ),
                         }
                     )
+
+        for source in light_sources:
+            source["visible"] = filter_light_visibility(
+                *source["origin"], source["visible"]
+            )
 
         visible_tiles = ambient_visible
         for src in light_sources:

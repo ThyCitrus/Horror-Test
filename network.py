@@ -395,9 +395,7 @@ class GameClient:
         self._stream.send({"type": "input", "dx": dx, "dy": dy})
 
     def send_turn(self, facing, look_angle=0.0):
-        self._stream.send(
-            {"type": "turn", "facing": facing, "look_angle": look_angle}
-        )
+        self._stream.send({"type": "turn", "facing": facing, "look_angle": look_angle})
 
     def poll_messages(self):
         """Non-blocking drain. Call once per frame; dispatch by msg['type']."""
