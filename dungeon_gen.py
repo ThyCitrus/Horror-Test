@@ -67,9 +67,9 @@ def parse_ascii_dungeon(ascii_str):
 
 
 def build_lobby_dungeon():
-    from test_lobby import test_lobby
+    from lobby import lobby
 
-    return parse_ascii_dungeon(test_lobby[0])
+    return parse_ascii_dungeon(lobby[0])
 
 
 def _infer_door_orientation(dungeon, x, y):
