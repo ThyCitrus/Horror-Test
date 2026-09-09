@@ -8,6 +8,7 @@ from dungeon_gen import (
     FLOOR,
     seed_rng,
     compute_visible_tiles,
+    has_line_of_sight,
     reveal_boundary_walls,
     get_fog_brightness,
     get_light_brightness,
@@ -760,28 +761,11 @@ def main():
         )
 
         # --- physical light sources: shared, additive, visible to everyone ---
-        def filter_light_visibility(source_x, source_y, tiles):
-            filtered = set()
-            for target_x, target_y in tiles:
-                dx = target_x - source_x
-                dy = target_y - source_y
-                steps = max(abs(dx), abs(dy))
-                blocked = False
-                for step in range(1, steps):
-                    check_x = round(source_x + dx * step / steps)
-                    check_y = round(source_y + dy * step / steps)
-                    if dungeon.get((check_x, check_y), WALL) == WALL:
-                        blocked = True
-                        break
-                if not blocked:
-                    filtered.add((target_x, target_y))
-            return filtered
-
         light_sources = []
         if equipped_light == "Flashlight" and light_on:
             light_sources.append(
                 {
-                    "origin": (px, py),
+                    "is_local": True,
                     "visible": compute_visible_tiles(
                         dungeon,
                         doors,
@@ -806,7 +790,7 @@ def main():
         elif equipped_light == "Lantern" and light_on:
             light_sources.append(
                 {
-                    "origin": (px, py),
+                    "is_local": True,
                     "visible": compute_visible_tiles(
                         dungeon,
                         doors,
@@ -840,7 +824,7 @@ def main():
                 if p["equipped_light"] == "Flashlight":
                     light_sources.append(
                         {
-                            "origin": (ox, oy),
+                            "is_local": False,
                             "visible": compute_visible_tiles(
                                 dungeon,
                                 doors,
@@ -865,7 +849,7 @@ def main():
                 elif p["equipped_light"] == "Lantern":
                     light_sources.append(
                         {
-                            "origin": (ox, oy),
+                            "is_local": False,
                             "visible": compute_visible_tiles(
                                 dungeon,
                                 doors,
@@ -886,9 +870,12 @@ def main():
                     )
 
         for source in light_sources:
-            source["visible"] = filter_light_visibility(
-                *source["origin"], source["visible"]
-            )
+            if not source["is_local"]:
+                source["visible"] = {
+                    (tx, ty)
+                    for (tx, ty) in source["visible"]
+                    if has_line_of_sight(dungeon, doors, px, py, tx, ty)
+                }
 
         visible_tiles = ambient_visible
         for src in light_sources:
