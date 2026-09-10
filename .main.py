@@ -189,7 +189,11 @@ def main():
                 pos
                 for pos, item in floor_items.items()
                 if item["item_id"]
-                == (ROAMING_SIGNAL if objective_type == "roaming" else OBJECTIVE_TERMINAL)
+                == (
+                    ROAMING_SIGNAL
+                    if objective_type == "roaming"
+                    else OBJECTIVE_TERMINAL
+                )
             ),
             None,
         )
@@ -416,6 +420,10 @@ def main():
                 net_client.send_objective_complete()
             return "Puzzle solved; upload request sent to host."
         if objective["type"] == "long" and objective["progress"] < objective["required"]:
+        if (
+            objective["type"] == "long"
+            and objective["progress"] < objective["required"]
+        ):
             return "Upload blocked: recover more data fragments."
         objective["target_progress"] = min(
             objective.get("target_count", 1),
@@ -454,9 +462,7 @@ def main():
             load_floor(floor_number, active_seed, get_player_count())
         doors = {}
         discovered.clear()
-        floor_tiles = [
-            pos for pos, char in dungeon.items() if char in (FLOOR, LADDER)
-        ]
+        floor_tiles = [pos for pos, char in dungeon.items() if char in (FLOOR, LADDER)]
         player_x, player_y = floor_tiles[0] if floor_tiles else (0, 0)
         shared_bytes = (
             terminal.active_character.get("bytes", 0)
@@ -561,6 +567,7 @@ def main():
 
         if mtype == "roster":
             seed = msg["seed"]
+            active_seed = seed
             floor_number = msg.get("floor", floor_number)
             shared_bytes = msg.get("shared_bytes", shared_bytes)
             objective = msg.get("objective")
@@ -600,7 +607,11 @@ def main():
         elif mtype == "purchase_result":
             terminal.set_transient(
                 msg.get("message", "Purchase denied."),
-                (80, 255, 80) if "Purchased" in msg.get("message", "") else (255, 180, 80),
+                (
+                    (80, 255, 80)
+                    if "Purchased" in msg.get("message", "")
+                    else (255, 180, 80)
+                ),
                 duration_ms=1800,
             )
 
@@ -906,7 +917,9 @@ def main():
                             slot_path(terminal.active_character["slot"]),
                         )
                 elif pos in dungeon and dungeon[pos] == LADDER:
-                    if not objective or not objective.get("completed"):
+                    if active_seed != SHOP_SEED and (
+                        not objective or not objective.get("completed")
+                    ):
                         terminal.set_transient(
                             "Ladder locked: complete the objective first.",
                             (255, 180, 80),
@@ -1029,6 +1042,10 @@ def main():
                         not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
                         and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
                     ):
+                    if blocking_item not in (
+                        OBJECTIVE_TERMINAL,
+                        SHOP_TERMINAL,
+                    ) and is_walkable(dungeon, doors, target_x, target_y, dx, dy):
                         player_x, player_y = target_x, target_y
 
                 time_since_last_move = 0
@@ -1052,7 +1069,10 @@ def main():
                 player_state = net_server.get_players_snapshot().get(cid)
                 if not player_state:
                     continue
-                if abs(player_state["x"] - ix) + abs(player_state["y"] - iy) > DOOR_INTERACT_RANGE + 1:
+                if (
+                    abs(player_state["x"] - ix) + abs(player_state["y"] - iy)
+                    > DOOR_INTERACT_RANGE + 1
+                ):
                     continue
                 if dungeon.get((ix, iy)) == DOOR:
                     door = materialize_door(dungeon, doors, ix, iy)
@@ -1096,9 +1116,7 @@ def main():
                             objective["progress"] = min(
                                 objective["required"], objective["progress"] + 1
                             )
-                        net_server.set_world_state(
-                            objective=objective
-                        )
+                        net_server.set_world_state(objective=objective)
                     else:
                         net_server.add_item_to_player(cid, item_id)
                         if item_id in LIGHT_ITEM_IDS:
@@ -1117,11 +1135,12 @@ def main():
                     continue
                 owned = player_state.get("items", [])
                 if item_id in owned:
-                    net_server.send_purchase_result(cid, f"{ITEM_NAMES[item_id]} already owned.")
+                    net_server.send_purchase_result(
+                        cid, f"{ITEM_NAMES[item_id]} already owned."
+                    )
                     continue
-                free_light = (
-                    item_id in LIGHT_ITEM_IDS
-                    and not player_state.get("shop_free_light_used", False)
+                free_light = item_id in LIGHT_ITEM_IDS and not player_state.get(
+                    "shop_free_light_used", False
                 )
                 price = 0 if free_light else 100
                 if net_server.shared_bytes < price:
@@ -1136,12 +1155,16 @@ def main():
                         net_server.players[cid]["shop_free_light_used"] = True
                 if item_id in LIGHT_ITEM_IDS:
                     net_server.set_equipped_light(cid, item_id)
-                net_server.send_purchase_result(cid, f"Purchased {ITEM_NAMES[item_id]}.")
+                net_server.send_purchase_result(
+                    cid, f"Purchased {ITEM_NAMES[item_id]}."
+                )
             for cid in net_server.consume_pending_deposits():
                 player_state = net_server.get_players_snapshot().get(cid)
                 if not player_state:
                     continue
-                loot_value = sum(entry.get("value", 0) for entry in player_state.get("loot", []))
+                loot_value = sum(
+                    entry.get("value", 0) for entry in player_state.get("loot", [])
+                )
                 if loot_value <= 0:
                     net_server.send_purchase_result(cid, "No floor loot to deposit.")
                     continue
@@ -1162,7 +1185,11 @@ def main():
                 ladder = next(
                     (pos for pos, tile in dungeon.items() if tile == LADDER), None
                 )
-                if pdata and ladder and abs(pdata["x"] - ladder[0]) + abs(pdata["y"] - ladder[1]) <= 1:
+                if (
+                    pdata
+                    and ladder
+                    and abs(pdata["x"] - ladder[0]) + abs(pdata["y"] - ladder[1]) <= 1
+                ):
                     advance_floor()
                     descended = True
             net_server.set_world_state(
@@ -1190,6 +1217,10 @@ def main():
                     not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
                     and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
                 ):
+                if blocking_item not in (
+                    OBJECTIVE_TERMINAL,
+                    SHOP_TERMINAL,
+                ) and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
                     net_server.update_player_position(
                         cid, target_x, target_y, pdata["facing"]
                     )
@@ -1538,9 +1569,7 @@ def main():
                 elif (wx, wy) in items and items[(wx, wy)]["item_id"] == SHOP_TERMINAL:
                     base_tile_color = SHOP_COLOR
                 elif active_seed == SHOP_SEED:
-                    base_tile_color = (
-                        (155, 55, 55) if is_wall_like else (72, 32, 32)
-                    )
+                    base_tile_color = (155, 55, 55) if is_wall_like else (72, 32, 32)
                 else:
                     base_tile_color = (
                         ITEM_COLOR
