@@ -385,7 +385,7 @@ class GameServer:
             if player and player.get("socket"):
                 player["socket"].send({"type": "purchase_result", "message": message})
 
-    def send_objective_start(self, client_id, objective, target=None):
+    def send_objective_start(self, client_id, objective, target=None, objective_pos=None):
         with self._lock:
             player = self.players.get(client_id)
             if player and player.get("socket"):
@@ -394,6 +394,7 @@ class GameServer:
                         "type": "objective_start",
                         "objective": objective,
                         "target": list(target) if target else None,
+                        "objective_pos": list(objective_pos) if objective_pos else None,
                     }
                 )
 

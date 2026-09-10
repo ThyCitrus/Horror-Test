@@ -156,6 +156,8 @@ def main():
     items = {}
     floor_number = 1
     objective = None
+    active_objective_pos = None
+    active_network_objectives = {}
     shared_bytes = 0
     seen_events = set()
     last_door_target = None
@@ -412,7 +414,7 @@ def main():
         return f"Purchased {ITEM_NAMES[item_id]}."
 
     def complete_objective(action_index=0):
-        nonlocal objective
+        nonlocal objective, active_objective_pos
         if not objective:
             return "No active objective."
         if objective.get("completed"):
@@ -420,6 +422,9 @@ def main():
         if terminal.network_mode and net_server is None:
             if net_client:
                 net_client.send_objective_complete()
+            if active_objective_pos is not None:
+                items.pop(active_objective_pos, None)
+                active_objective_pos = None
             return "Puzzle solved; upload request sent to host."
         if (
             objective["type"] == "long"
@@ -435,6 +440,12 @@ def main():
         )
         if objective["completed"]:
             objective["progress"] = objective["required"]
+        if active_objective_pos is not None:
+            item = items.get(active_objective_pos)
+            if item and item.get("item_id") in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                items.pop(active_objective_pos, None)
+            active_objective_pos = None
+        else:
             for item_pos, item_data in list(items.items()):
                 if item_data.get("item_id") == ROAMING_SIGNAL:
                     items.pop(item_pos, None)
@@ -619,11 +630,10 @@ def main():
         elif mtype == "objective_start":
             remote_objective = msg.get("objective") or objective
             target = msg.get("target")
-            if (
-                remote_objective
-                and remote_objective.get("type") == "roaming"
-                and target
-            ):
+            objective_pos = msg.get("objective_pos")
+            if objective_pos:
+                active_objective_pos = tuple(objective_pos)
+            if remote_objective and remote_objective.get("type") == "roaming" and target:
                 if terminal.network_mode and local_client_id in players:
                     local_position = (
                         players[local_client_id]["x"],
@@ -864,6 +874,7 @@ def main():
                         if terminal.network_mode:
                             net_client.send_interact(*pos)
                         elif item_id == OBJECTIVE_TERMINAL:
+                            active_objective_pos = pos
                             terminal.open_objective_terminal(objective)
                         else:
                             if objective and not objective.get("completed"):
@@ -884,6 +895,7 @@ def main():
                                         )
                                         + abs(candidate[1] - player_y),
                                     )
+                                    active_objective_pos = pos
                                     terminal.start_signal_tracker(
                                         objective, target, (player_x, player_y)
                                     )
@@ -1041,10 +1053,11 @@ def main():
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
                     blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                    if blocking_item not in (
-                        OBJECTIVE_TERMINAL,
-                        SHOP_TERMINAL,
-                    ) and is_walkable(dungeon, doors, target_x, target_y, dx, dy):
+                    if (
+                        blocking_item
+                        not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
+                        and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
+                    ):
                         player_x, player_y = target_x, target_y
 
                 time_since_last_move = 0
@@ -1063,6 +1076,7 @@ def main():
             net_server.set_doors_snapshot(doors)
             net_server.set_items_snapshot(items)
             for _cid in net_server.consume_pending_objective_completions():
+                active_objective_pos = active_network_objectives.pop(_cid, None)
                 complete_objective()
             for cid, ix, iy in net_server.consume_pending_interacts():
                 player_state = net_server.get_players_snapshot().get(cid)
@@ -1099,7 +1113,13 @@ def main():
                                     )
                                     + abs(candidate[1] - player_pos[1]),
                                 )
-                        net_server.send_objective_start(cid, objective, target)
+                        active_network_objectives[cid] = (ix, iy)
+                        net_server.send_objective_start(
+                            cid,
+                            objective,
+                            target,
+                            objective_pos=(ix, iy),
+                        )
             for cid, ix, iy in net_server.consume_pending_pickups():
                 pos = (ix, iy)
                 if pos in items:
@@ -1213,10 +1233,11 @@ def main():
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
                 blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                if blocking_item not in (
-                    OBJECTIVE_TERMINAL,
-                    SHOP_TERMINAL,
-                ) and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
+                if (
+                    blocking_item
+                    not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
+                    and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
+                ):
                     net_server.update_player_position(
                         cid, target_x, target_y, pdata["facing"]
                     )
