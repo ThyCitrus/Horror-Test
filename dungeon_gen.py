@@ -130,15 +130,32 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     occupied = set(ladder_positions)
     wall_mounts = [
         pos for pos in floors
-        if any(tiles.get((pos[0] + dx, pos[1] + dy)) == WALL for dx, dy in DIRECTIONS.values())
+        if any(
+            tiles.get((pos[0] + dx, pos[1] + dy)) == WALL
+            for dx, dy in DIRECTIONS.values()
+        )
+        and not any(
+            tiles.get((pos[0] + dx, pos[1] + dy)) == DOOR
+            for dx, dy in DIRECTIONS.values()
+        )
     ]
     wall_mounts = [pos for pos in wall_mounts if pos not in occupied]
+    safe_floors = [
+        pos
+        for pos in floors
+        if pos not in occupied
+        and not any(
+            tiles.get((pos[0] + dx, pos[1] + dy)) == DOOR
+            for dx, dy in DIRECTIONS.values()
+        )
+    ]
     shop_floors_visited = max(0, (floor_number - 1) // 3)
     items = {}
     objective_count = max(1, math.ceil((14 * max(1, int(player_count)) + floor_number) / 10))
+    objective_candidates = wall_mounts or safe_floors
     objective_positions = rng.sample(
-        wall_mounts or [pos for pos in floors if pos not in occupied] or floors,
-        min(objective_count, len(wall_mounts or floors)),
+        objective_candidates,
+        min(objective_count, len(objective_candidates)),
     )
     roaming_count = min(shop_floors_visited, len(objective_positions))
     for index, objective_pos in enumerate(objective_positions):
@@ -152,7 +169,11 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             "item_id": item_id,
             "objective_type": objective_type,
         }
-    objective_type = items[objective_positions[0]]["objective_type"]
+    objective_type = (
+        items[objective_positions[0]]["objective_type"]
+        if objective_positions
+        else "fast"
+    )
     scrap_pool = [
         pos for pos in floors
         if pos not in occupied and pos not in items
