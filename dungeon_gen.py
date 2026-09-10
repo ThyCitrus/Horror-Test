@@ -14,6 +14,11 @@ DIRECTIONS = {
 }
 
 LOBBY_SEED = -1  # sentinel: "load the hand-crafted lobby", never a real generated seed
+SHOP_SEED = 0  # sentinel: "load the pregame shop floor"
+SHOP_TERMINAL = "ShopTerminal"
+OBJECTIVE_TERMINAL = "ObjectiveTerminal"
+DATA_SCRAP = "DataScrap"
+ROAMING_SIGNAL = "RoamingSignal"
 
 TILE_CHAR_MAP = {
     "#": WALL,
@@ -36,7 +41,16 @@ TILE_CHAR_MAP = {
     "|": DOOR,
     "_": DOOR,
 }
-ITEM_SPAWN_CHARS = {"?": "TestItem", "F": "Flashlight", "L": "Lantern"}
+ITEM_SPAWN_CHARS = {
+    "?": "TestItem",
+    "F": "Flashlight",
+    "L": "Lantern",
+    "M": "Map",
+    "‰": SHOP_TERMINAL,
+    "T": OBJECTIVE_TERMINAL,
+    "$": DATA_SCRAP,
+    "S": ROAMING_SIGNAL,
+}
 
 
 def parse_ascii_dungeon(ascii_str):
@@ -70,6 +84,67 @@ def build_lobby_dungeon():
     from lobby import test_lobby
 
     return parse_ascii_dungeon(test_lobby[0])
+
+
+def build_shop_dungeon():
+    """Build the compact pregame shop used when a new save starts."""
+    tiles = {}
+    carve_rect(tiles, -10, -10, 21, 20)
+    tiles[(0, 7)] = LADDER
+    items = {(0, -9): {"item_id": SHOP_TERMINAL}}
+    return tiles, {}, items
+
+
+def build_floor_dungeon(floor_number, seed):
+    """Generate a playable floor and deterministic objective pickup layout."""
+    tiles = generate_dungeon(max_structures=60, seed=seed)
+    rng = random.Random(seed + floor_number * 7919)
+    floors = [
+        pos for pos, tile in tiles.items() if tile == FLOOR
+    ]
+    if not floors:
+        return tiles, {}, {}
+    ladder_positions = [pos for pos, tile in tiles.items() if tile == LADDER]
+    occupied = set(ladder_positions)
+    objective_pos = rng.choice([pos for pos in floors if pos not in occupied] or floors)
+    shop_floors_visited = max(0, (floor_number - 1) // 3)
+    if shop_floors_visited and floor_number % 3 == 1:
+        objective_type = "roaming"
+    else:
+        objective_type = "fast" if rng.random() < 0.75 else "long"
+    items = {}
+    if objective_type in ("fast", "long"):
+        items[objective_pos] = {"item_id": OBJECTIVE_TERMINAL}
+    if objective_type == "roaming":
+        signal_pos = rng.choice(
+            [pos for pos in floors if pos not in occupied and pos != objective_pos]
+            or floors
+        )
+        items[signal_pos] = {"item_id": ROAMING_SIGNAL}
+    scrap_pool = [
+        pos for pos in floors
+        if pos not in occupied and pos not in items
+    ]
+    rng.shuffle(scrap_pool)
+    scrap_count = max(3 if objective_type == "long" else 2, min(5, 2 + floor_number // 2))
+    scrap_values = (
+        (100, 70),
+        (500, 25),
+        (1_000, 5),
+        (10_000, 2 if shop_floors_visited else 0),
+        (100_000, 1 if shop_floors_visited >= 2 else 0),
+    )
+    weighted_values = [
+        value
+        for value, weight in scrap_values
+        for _ in range(weight)
+    ]
+    for pos in scrap_pool[:scrap_count]:
+        items[pos] = {
+            "item_id": DATA_SCRAP,
+            "value": rng.choice(weighted_values or [100]),
+        }
+    return tiles, {}, items
 
 
 def _infer_door_orientation(dungeon, x, y):

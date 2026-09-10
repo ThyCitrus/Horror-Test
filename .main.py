@@ -15,6 +15,14 @@ from dungeon_gen import (
     find_adjacent_spawn,
     LOBBY_SEED,
     build_lobby_dungeon,
+    build_shop_dungeon,
+    build_floor_dungeon,
+    SHOP_SEED,
+    SHOP_TERMINAL,
+    OBJECTIVE_TERMINAL,
+    DATA_SCRAP,
+    ROAMING_SIGNAL,
+    LADDER,
     DOOR,
     DOOR_ANIM_MS,
     is_walkable,
@@ -26,7 +34,14 @@ from dungeon_gen import (
 )
 from enemies import Enemy, ENEMY_TYPES  # TODO: currently unused — no spawn logic yet
 from terminal_ui import TerminalUI
-from save_utils import load_json, save_json, slot_path
+from save_utils import (
+    add_character_event,
+    add_notepad_entry,
+    load_json,
+    normalize_character,
+    save_json,
+    slot_path,
+)
 from network import GameServer, GameClient, DEFAULT_PORT
 
 WINDOW_WIDTH, WINDOW_HEIGHT = 1200, 660
@@ -65,7 +80,18 @@ ITEM_NAMES = {
     "TestItem": "Test Item",
     "Flashlight": "Flashlight",
     "Lantern": "Lantern",
+    "Map": "Map",
+    SHOP_TERMINAL: "Shop Terminal",
+    OBJECTIVE_TERMINAL: "Objective Terminal",
+    DATA_SCRAP: "Data Scrap",
+    ROAMING_SIGNAL: "Roaming Signal",
 }  # item_id -> display name, falls back to item_id
+ITEM_GLYPHS = {
+    SHOP_TERMINAL: "‰",
+    OBJECTIVE_TERMINAL: "T",
+    DATA_SCRAP: "$",
+    ROAMING_SIGNAL: "S",
+}
 TOGGLE_LIGHT_KEY = pygame.BUTTON_LEFT
 LOOK_SEND_INTERVAL_MS = (
     100  # throttle for continuous angle sync, separate from discrete facing changes
@@ -108,7 +134,7 @@ def main():
     bold_font = pygame.font.SysFont(FONT_NAME, 18, bold=True)
     pause_font = pygame.font.SysFont(FONT_NAME, 48, bold=True)
 
-    active_seed = seed_rng.randint(0, 999999)
+    active_seed = seed_rng.randint(1, 999999)
     dungeon = generate_dungeon(max_structures=60, seed=active_seed)
     floor_tiles = [pos for pos, char in dungeon.items() if char == FLOOR]
     player_x, player_y = floor_tiles[0] if floor_tiles else (0, 0)
@@ -125,11 +151,76 @@ def main():
     )  # client_id -> {x,y,visual_x,visual_y,facing,color,name,alive,connected}
     doors = {}  # (x,y) -> {"state": "closed"|"opening"|"open", "anim_start": timestamp}
     items = {}
+    floor_number = 1
+    objective = None
+    shared_bytes = 0
+    seen_events = set()
     last_door_target = None
     last_door_target_time = 0
 
+    def make_floor_objective(number, floor_items):
+        objective_type = ("fast", "long", "roaming")[(number - 1) % 3]
+        if objective_type == "long":
+            title, required = "Recover three data fragments", 3
+        elif objective_type == "roaming":
+            title, required = "Locate the roaming signal", 1
+        else:
+            title, required = "Complete the fast terminal handshake", 1
+        target = next(
+            (
+                pos
+                for pos, item in floor_items.items()
+                if item["item_id"]
+                == (ROAMING_SIGNAL if objective_type == "roaming" else OBJECTIVE_TERMINAL)
+            ),
+            None,
+        )
+        return {
+            "id": f"floor-{number}-{objective_type}",
+            "type": objective_type,
+            "title": title,
+            "progress": 0,
+            "required": required,
+            "target": list(target) if target else None,
+            "completed": False,
+            "terminal_prompt": {
+                "fast": "FAST HANDSHAKE // EXECUTE",
+                "long": "ARCHIVE UPLOAD // REQUIRE FRAGMENTS",
+                "roaming": "SIGNAL LOCK // COMPLETE",
+            }[objective_type],
+            "terminal_actions": ["Execute objective", "Leave terminal"],
+        }
+
+    def load_floor(number, seed):
+        nonlocal dungeon, doors, items, objective
+        dungeon, doors, items = build_floor_dungeon(number, seed)
+        objective = make_floor_objective(number, items)
+
+    def narrative_for_floor(number, objective_data=None):
+        hooks = {
+            "Archive": "ARCHIVE: The facility is still indexing the breach.",
+            "Donnie": "DONNIE: A maintenance ping says someone is watching the lifts.",
+            "Agnate": "AGNATE: Signal residue matches an impossible heartbeat.",
+        }
+        names = list(hooks)
+        name = names[(number - 1) % len(names)]
+        text = hooks[name]
+        lore = f"{name} // floor {number}: {text.split(': ', 1)[1]}"
+        terminal.add_system_event(text, lore)
+        if net_server:
+            net_server.add_event(text)
+        if terminal.active_character and objective_data is not None:
+            terminal.active_character["objective"] = objective_data
+            save_json(
+                terminal.active_character,
+                slot_path(terminal.active_character["slot"]),
+            )
+
+    def sync_world_ui():
+        terminal.set_world_state(floor_number, objective, shared_bytes)
+
     def handle_slot_hover(slot_info, get_current=False):
-        nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors, items
+        nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors, items, floor_number, objective, shared_bytes
         if get_current:
             return active_seed, (player_x, player_y)
 
@@ -137,28 +228,38 @@ def main():
             return
 
         if slot_info["filled"]:
-            char_data = load_json(slot_info["path"])
-            active_seed = char_data.get("seed", seed_rng.randint(0, 999999))
-            dungeon = generate_dungeon(max_structures=60, seed=active_seed)
-            player_x = char_data.get("player_x", floor_tiles[0][0])
-            player_y = char_data.get("player_y", floor_tiles[0][1])
+            char_data = normalize_character(load_json(slot_info["path"]))
+            active_seed = char_data.get("seed", seed_rng.randint(1, 999999))
+            floor_number = char_data.get("floor", 0 if active_seed == SHOP_SEED else 1)
+            if active_seed == SHOP_SEED:
+                dungeon, doors, items = build_shop_dungeon()
+                objective = None
+            else:
+                load_floor(floor_number, active_seed)
+                objective = char_data.get("objective") or objective
+            shared_bytes = char_data.get("bytes", char_data.get("gold", 0))
+            preview_floors = [pos for pos, c in dungeon.items() if c in (FLOOR, LADDER)]
+            default_pos = preview_floors[0] if preview_floors else (0, 0)
+            player_x = char_data.get("player_x", default_pos[0])
+            player_y = char_data.get("player_y", default_pos[1])
             player_color = tuple(map(int, char_data["color"].split()))
-            doors = {}
-            items = {}
         else:
             if terminal.pending_mode == "host":
                 active_seed = LOBBY_SEED
                 dungeon, doors, items = build_lobby_dungeon()
+                objective = None
             else:
-                active_seed = seed_rng.randint(0, 999999)
-                dungeon = generate_dungeon(max_structures=60, seed=active_seed)
-                doors = {}
-                items = {}
-            preview_floors = [pos for pos, c in dungeon.items() if c == FLOOR]
+                active_seed = SHOP_SEED
+                dungeon, doors, items = build_shop_dungeon()
+                objective = None
+            floor_number = 0 if active_seed == SHOP_SEED else 1
+            shared_bytes = 100
+            preview_floors = [pos for pos, c in dungeon.items() if c in (FLOOR, LADDER)]
             player_x, player_y = preview_floors[0] if preview_floors else (0, 0)
             player_color = (120, 120, 120)
 
         enemies = []
+        sync_world_ui()
 
     # --- multiplayer glue ---
 
@@ -168,6 +269,9 @@ def main():
             seed=active_seed,
             port=DEFAULT_PORT,
             spawn_fn=lambda: find_adjacent_spawn(dungeon, player_x, player_y),
+            floor_number=floor_number,
+            shared_bytes=shared_bytes,
+            objective=objective,
         )
         net_server.start()
         net_client = GameClient()
@@ -223,6 +327,119 @@ def main():
         doors = {}
         items = {}
 
+    def purchase_shop_item(item_id):
+        nonlocal shared_bytes
+        if terminal.network_mode and net_server is None:
+            if net_client:
+                net_client.send_purchase(item_id)
+            return "Purchase request sent to Archive."
+        character = terminal.active_character
+        if not character:
+            return "No active player."
+        character.setdefault("items", [])
+        character.setdefault("bytes", character.get("gold", 0))
+        character.setdefault("shop_free_light_used", False)
+        if item_id in character["items"]:
+            return f"{ITEM_NAMES[item_id]} already owned."
+        is_light = item_id in LIGHT_ITEM_IDS
+        if is_light and not character["shop_free_light_used"]:
+            character["shop_free_light_used"] = True
+            price = 0
+        else:
+            price = 100
+        if character["bytes"] < price:
+            return "Insufficient bytes."
+        character["bytes"] -= price
+        shared_bytes = character["bytes"]
+        character["items"].append(item_id)
+        if is_light:
+            character["equipped_light"] = item_id
+        save_json(character, slot_path(character["slot"]))
+        return f"Purchased {ITEM_NAMES[item_id]}."
+
+    def complete_objective(action_index=0):
+        nonlocal objective
+        if not objective:
+            return "No active objective."
+        if objective["type"] == "long" and objective["progress"] < objective["required"]:
+            return "Upload blocked: recover more data fragments."
+        objective["progress"] = objective["required"]
+        objective["completed"] = True
+        text = f"Objective complete: {objective['title']}."
+        terminal.add_system_event(text)
+        if terminal.active_character:
+            terminal.active_character["objective"] = objective
+            save_json(
+                terminal.active_character,
+                slot_path(terminal.active_character["slot"]),
+            )
+        if net_server:
+            net_server.set_world_state(objective=objective)
+        return text
+
+    def advance_floor():
+        nonlocal active_seed, dungeon, doors, items, player_x, player_y, floor_number, objective, shared_bytes, discovered
+        floor_number += 1
+        if floor_number % 3 == 0:
+            active_seed = SHOP_SEED
+            dungeon, doors, items = build_shop_dungeon()
+            objective = None
+        else:
+            active_seed = seed_rng.randint(1, 999999)
+            load_floor(floor_number, active_seed)
+        doors = {}
+        discovered.clear()
+        floor_tiles = [
+            pos for pos, char in dungeon.items() if char in (FLOOR, LADDER)
+        ]
+        player_x, player_y = floor_tiles[0] if floor_tiles else (0, 0)
+        shared_bytes = (
+            terminal.active_character.get("bytes", 0)
+            if terminal.active_character
+            else shared_bytes
+        )
+        if terminal.active_character:
+            terminal.active_character.update(
+                {
+                    "seed": active_seed,
+                    "floor": floor_number,
+                    "player_x": player_x,
+                    "player_y": player_y,
+                    "objective": objective,
+                    "bytes": shared_bytes,
+                }
+            )
+            save_json(
+                terminal.active_character,
+                slot_path(terminal.active_character["slot"]),
+            )
+        if net_server:
+            for cid, pdata in net_server.get_players_snapshot().items():
+                spawn_x, spawn_y = (
+                    (player_x, player_y)
+                    if cid == local_client_id
+                    else find_adjacent_spawn(dungeon, player_x, player_y)
+                )
+                net_server.update_player_position(
+                    cid, spawn_x, spawn_y, pdata.get("facing", "v")
+                )
+                if cid in players:
+                    players[cid]["x"] = spawn_x
+                    players[cid]["y"] = spawn_y
+        narrative_for_floor(floor_number, objective)
+        if not objective:
+            terminal.add_system_event(
+                f"Shop floor {floor_number}: resupply before descent."
+            )
+        if net_server:
+            net_server.seed = active_seed
+            net_server.set_world_state(
+                floor_number=floor_number,
+                shared_bytes=shared_bytes,
+                objective=objective,
+            )
+        sync_world_ui()
+
     terminal = TerminalUI(
         font,
         bold_font,
@@ -231,6 +448,8 @@ def main():
         on_mp_color_confirm=confirm_mp_color,
         on_multiplayer_quit=teardown_multiplayer,
         on_drop_item=drop_item,
+        on_shop_purchase=purchase_shop_item,
+        on_objective_action=complete_objective,
     )
 
     def sync_players_from_state(state_players):
@@ -267,17 +486,20 @@ def main():
                     p["look_angle"] = pdata.get("look_angle", 0.0)
 
     def handle_network_message(msg):
-        nonlocal dungeon, doors, items
+        nonlocal active_seed, dungeon, doors, items, floor_number, objective, shared_bytes
         mtype = msg.get("type")
 
         if mtype == "roster":
             seed = msg["seed"]
+            floor_number = msg.get("floor", floor_number)
+            shared_bytes = msg.get("shared_bytes", shared_bytes)
+            objective = msg.get("objective")
             if seed == LOBBY_SEED:
                 dungeon, doors, items = build_lobby_dungeon()
+            elif seed == SHOP_SEED:
+                dungeon, doors, items = build_shop_dungeon()
             else:
-                dungeon = generate_dungeon(max_structures=60, seed=seed)
-                doors = {}
-                items = {}
+                dungeon, doors, items = build_floor_dungeon(floor_number, seed)
             if msg.get("reconnect"):
                 you = msg["you"]
                 players[local_client_id] = {
@@ -293,12 +515,20 @@ def main():
                     "items": [],
                     "equipped_light": None,
                     "light_on": False,
+                    "look_angle": 0.0,
                 }
                 terminal.enter_multiplayer_playing(you["name"], you["color"])
             elif terminal.state == "CONNECTING":
                 terminal.enter_mp_name_input(
                     msg.get("taken_names", []), msg.get("taken_colors", [])
                 )
+
+        elif mtype == "purchase_result":
+            terminal.set_transient(
+                msg.get("message", "Purchase denied."),
+                (80, 255, 80) if "Purchased" in msg.get("message", "") else (255, 180, 80),
+                duration_ms=1800,
+            )
 
         elif mtype == "join_ack":
             is_host = net_server is not None
@@ -317,6 +547,9 @@ def main():
                 "light_on": False,
                 "look_angle": look_angle,
             }
+            floor_number = msg.get("floor", floor_number)
+            shared_bytes = msg.get("shared_bytes", shared_bytes)
+            objective = msg.get("objective", objective)
             if is_host:
                 net_server.update_player_position(
                     local_client_id, player_x, player_y, player_facing
@@ -332,6 +565,19 @@ def main():
 
         elif mtype == "state":
             sync_players_from_state(msg["players"])
+            incoming_seed = msg.get("seed", active_seed)
+            if net_server is None and incoming_seed != active_seed:
+                active_seed = incoming_seed
+                if active_seed == SHOP_SEED:
+                    dungeon, doors, items = build_shop_dungeon()
+                else:
+                    dungeon, doors, items = build_floor_dungeon(
+                        msg.get("floor", floor_number), active_seed
+                    )
+                doors = {}
+            floor_number = msg.get("floor", floor_number)
+            shared_bytes = msg.get("shared_bytes", shared_bytes)
+            objective = msg.get("objective", objective)
             if net_server is None and "doors" in msg:
                 doors.clear()
                 for key, door_data in msg["doors"].items():
@@ -342,6 +588,11 @@ def main():
                 for key, item_data in msg["items"].items():
                     x_str, y_str = key.split(",")
                     items[(int(x_str), int(y_str))] = item_data
+            for event in msg.get("events", []):
+                if event not in seen_events:
+                    seen_events.add(event)
+                    terminal.add_system_event(event)
+            sync_world_ui()
 
         elif mtype == "disconnected":
             teardown_multiplayer()
@@ -475,18 +726,59 @@ def main():
                 extended_pos = (interact_x + 2 * ddx, interact_y + 2 * ddy)
 
                 if pos in items:
-                    if terminal.network_mode:
+                    item_id = items[pos]["item_id"]
+                    if item_id == SHOP_TERMINAL:
+                        if terminal.network_mode and terminal.active_character:
+                            terminal.open_shop(terminal.active_character)
+                        elif terminal.network_mode:
+                            net_client.send_interact(*pos)
+                        else:
+                            terminal.open_shop(terminal.active_character)
+                    elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                        if terminal.network_mode:
+                            net_client.send_interact(*pos)
+                        elif item_id == OBJECTIVE_TERMINAL:
+                            terminal.open_objective_terminal(objective)
+                        else:
+                            items.pop(pos)
+                            complete_objective()
+                    elif item_id == DATA_SCRAP and terminal.network_mode:
+                        net_client.send_pickup(*pos)
+                    elif terminal.network_mode:
                         net_client.send_pickup(*pos)
                     else:
                         item = items.pop(pos)
-                        item_id = item["item_id"]
-                        terminal.active_character["items"].append(item_id)
-                        if item_id in LIGHT_ITEM_IDS:
-                            terminal.active_character["equipped_light"] = item_id
+                        if item_id == DATA_SCRAP:
+                            value = item.get("value", 10)
+                            shared_bytes += value
+                            terminal.active_character["bytes"] = shared_bytes
+                            if objective and objective["type"] == "long":
+                                objective["progress"] = min(
+                                    objective["required"], objective["progress"] + 1
+                                )
+                            if terminal.active_character:
+                                terminal.active_character["objective"] = objective
+                                save_json(
+                                    terminal.active_character,
+                                    slot_path(terminal.active_character["slot"]),
+                                )
+                            terminal.add_system_event(
+                                f"Recovered {value} data bytes.",
+                            )
+                        else:
+                            terminal.active_character["items"].append(item_id)
+                            if item_id in LIGHT_ITEM_IDS:
+                                terminal.active_character["equipped_light"] = item_id
+                        terminal.active_character["objective"] = objective
                         save_json(
                             terminal.active_character,
                             slot_path(terminal.active_character["slot"]),
                         )
+                elif pos in dungeon and dungeon[pos] == LADDER:
+                    if terminal.network_mode:
+                        net_client.send_descend()
+                    else:
+                        advance_floor()
                 else:
                     target_door = None
                     if dungeon.get(pos) == DOOR:
@@ -600,25 +892,99 @@ def main():
             net_server.set_doors_snapshot(doors)
             net_server.set_items_snapshot(items)
             for cid, ix, iy in net_server.consume_pending_interacts():
-                if dungeon.get((ix, iy)) != DOOR:
-                    continue
                 player_state = net_server.get_players_snapshot().get(cid)
-                if (
-                    player_state
-                    and abs(player_state["x"] - ix) + abs(player_state["y"] - iy)
-                    > DOOR_INTERACT_RANGE + 1
-                ):
+                if not player_state:
                     continue
-                door = materialize_door(dungeon, doors, ix, iy)
-                begin_door_toggle(door, pygame.time.get_ticks())
+                if abs(player_state["x"] - ix) + abs(player_state["y"] - iy) > DOOR_INTERACT_RANGE + 1:
+                    continue
+                if dungeon.get((ix, iy)) == DOOR:
+                    door = materialize_door(dungeon, doors, ix, iy)
+                    begin_door_toggle(door, pygame.time.get_ticks())
+                elif (ix, iy) in items:
+                    item_id = items[(ix, iy)]["item_id"]
+                    if item_id == OBJECTIVE_TERMINAL:
+                        complete_objective()
+                        if objective and objective.get("completed"):
+                            items.pop((ix, iy), None)
+                    elif item_id == ROAMING_SIGNAL:
+                        complete_objective()
+                        items.pop((ix, iy), None)
             for cid, ix, iy in net_server.consume_pending_pickups():
                 pos = (ix, iy)
                 if pos in items:
                     item = items.pop(pos)
                     item_id = item["item_id"]
-                    net_server.add_item_to_player(cid, item_id)
-                    if item_id in LIGHT_ITEM_IDS:
-                        net_server.set_equipped_light(cid, item_id)
+                    if item_id == DATA_SCRAP:
+                        shared_bytes += item.get("value", 10)
+                        if terminal.active_character:
+                            terminal.active_character["bytes"] = shared_bytes
+                        if objective and objective["type"] == "long":
+                            objective["progress"] = min(
+                                objective["required"], objective["progress"] + 1
+                            )
+                        if terminal.active_character:
+                            terminal.active_character["objective"] = objective
+                            save_json(
+                                terminal.active_character,
+                                slot_path(terminal.active_character["slot"]),
+                            )
+                        net_server.set_world_state(
+                            shared_bytes=shared_bytes, objective=objective
+                        )
+                    else:
+                        net_server.add_item_to_player(cid, item_id)
+                        if item_id in LIGHT_ITEM_IDS:
+                            net_server.set_equipped_light(cid, item_id)
+            for cid, item_id in net_server.consume_pending_purchases():
+                player_state = net_server.get_players_snapshot().get(cid)
+                if not player_state:
+                    continue
+                if not any(
+                    item.get("item_id") == SHOP_TERMINAL for item in items.values()
+                ):
+                    net_server.send_purchase_result(cid, "Shop terminal unavailable.")
+                    continue
+                if item_id not in LIGHT_ITEM_IDS and item_id != "Map":
+                    net_server.send_purchase_result(cid, "Unknown catalogue item.")
+                    continue
+                owned = player_state.get("items", [])
+                if item_id in owned:
+                    net_server.send_purchase_result(cid, f"{ITEM_NAMES[item_id]} already owned.")
+                    continue
+                free_light = (
+                    item_id in LIGHT_ITEM_IDS
+                    and not player_state.get("shop_free_light_used", False)
+                )
+                price = 0 if free_light else 100
+                if net_server.shared_bytes < price:
+                    net_server.send_purchase_result(cid, "Insufficient shared bytes.")
+                    continue
+                if price:
+                    net_server.add_shared_bytes(-price)
+                    shared_bytes = net_server.shared_bytes
+                net_server.add_item_to_player(cid, item_id)
+                if free_light:
+                    with net_server._lock:
+                        net_server.players[cid]["shop_free_light_used"] = True
+                if item_id in LIGHT_ITEM_IDS:
+                    net_server.set_equipped_light(cid, item_id)
+                net_server.send_purchase_result(cid, f"Purchased {ITEM_NAMES[item_id]}.")
+            descended = False
+            for cid in net_server.consume_pending_descends():
+                if descended:
+                    continue
+                pdata = net_server.get_players_snapshot().get(cid)
+                ladder = next(
+                    (pos for pos, tile in dungeon.items() if tile == LADDER), None
+                )
+                if pdata and ladder and abs(pdata["x"] - ladder[0]) + abs(pdata["y"] - ladder[1]) <= 1:
+                    advance_floor()
+                    descended = True
+            net_server.set_world_state(
+                floor_number=floor_number,
+                shared_bytes=shared_bytes,
+                objective=objective,
+            )
             for cid, index in net_server.consume_pending_drops():
                 snap = net_server.get_players_snapshot().get(cid)
                 if not snap:
@@ -705,9 +1071,12 @@ def main():
             if face_pos in items:
                 item_id = items[face_pos]["item_id"]
                 name = ITEM_NAMES.get(item_id, item_id)
-                interact_prompt = f"[E] Pick up {name}"
+                action = "Access" if item_id == SHOP_TERMINAL else "Pick up"
+                interact_prompt = f"[E] {action} {name}"
             elif dungeon.get(face_pos) == DOOR:
                 interact_prompt = "[E] Open/close door"
+            elif dungeon.get(face_pos) == LADDER:
+                interact_prompt = "[E] Descend to facility"
 
             if terminal.network_mode and local_client_id in players:
                 equipped_light = players[local_client_id].get("equipped_light")
@@ -919,7 +1288,12 @@ def main():
                 draw_char, animating = door_render_info(dungeon, doors, wx, wy)
                 is_wall_like, should_stretch = False, False
             elif (wx, wy) in items:
-                draw_char, is_wall_like, should_stretch = ITEM_GLYPH, False, False
+                item_id = items[(wx, wy)]["item_id"]
+                draw_char, is_wall_like, should_stretch = (
+                    ITEM_GLYPHS.get(item_id, ITEM_GLYPH),
+                    False,
+                    False,
+                )
             else:
                 draw_char, is_wall_like = char, (char == WALL)
                 should_stretch = is_wall_like
@@ -1068,6 +1442,7 @@ def main():
         else:
             local_items_for_render = []
 
+        sync_world_ui()
         terminal.render(
             screen,
             terminal_rect,
@@ -1077,6 +1452,9 @@ def main():
             other_players=other_players_for_hud,
             local_items=local_items_for_render,
             interact_prompt=interact_prompt,
+            objective=objective,
+            floor_number=floor_number,
+            shared_bytes=shared_bytes if terminal.network_mode else None,
         )
         pygame.display.flip()
         # print(f"seed={active_seed}")  # debug

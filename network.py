@@ -22,6 +22,7 @@ from pathlib import Path
 DEFAULT_PORT = 5555
 BROADCAST_HZ = 10
 CLIENT_ID_PATH = Path(__file__).resolve().parent / "client_id.txt"
+_UNSET = object()
 
 
 # --- Local persistent client identity (not a security boundary, just continuity) ---
@@ -65,7 +66,15 @@ class _JsonStream:
 
 
 class GameServer:
-    def __init__(self, seed: int, port: int = DEFAULT_PORT, spawn_fn=None):
+    def __init__(
+        self,
+        seed: int,
+        port: int = DEFAULT_PORT,
+        spawn_fn=None,
+        floor_number: int = 1,
+        shared_bytes: int = 0,
+        objective=None,
+    ):
         self.seed = seed
         self.port = port
         self.players = {}  # client_id -> player record dict
@@ -77,7 +86,13 @@ class GameServer:
         self.doors_snapshot = {}
         self.pending_pickups = []
         self.pending_drops = []  # [(client_id, index), ...]
+        self.pending_descends = []
+        self.pending_purchases = []
         self.items_snapshot = {}
+        self.floor_number = floor_number
+        self.shared_bytes = shared_bytes
+        self.objective = objective
+        self.events = []
 
     def start(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -150,6 +165,12 @@ class GameServer:
                     elif mtype == "drop" and client_id:
                         with self._lock:
                             self.pending_drops.append((client_id, msg.get("index")))
+                    elif mtype == "descend" and client_id:
+                        with self._lock:
+                            self.pending_descends.append(client_id)
+                    elif mtype == "purchase" and client_id:
+                        with self._lock:
+                            self.pending_purchases.append((client_id, msg.get("item_id")))
                     elif mtype == "toggle_light" and client_id:
                         with self._lock:
                             if client_id in self.players:
@@ -179,6 +200,9 @@ class GameServer:
                         "reconnect": True,
                         "you": {"name": existing["name"], "color": existing["color"]},
                         "seed": self.seed,
+                        "floor": self.floor_number,
+                        "shared_bytes": self.shared_bytes,
+                        "objective": self.objective,
                     }
                 )
                 return
@@ -191,6 +215,9 @@ class GameServer:
                     "taken_names": taken_names,
                     "taken_colors": taken_colors,
                     "seed": self.seed,
+                    "floor": self.floor_number,
+                    "shared_bytes": self.shared_bytes,
+                    "objective": self.objective,
                 }
             )
 
@@ -245,6 +272,9 @@ class GameServer:
                     "client_id": client_id,
                     "name": name,
                     "color": color,
+                    "shared_bytes": self.shared_bytes,
+                    "floor": self.floor_number,
+                    "objective": self.objective,
                 }
             )
 
@@ -312,6 +342,24 @@ class GameServer:
             self.pending_drops = []
             return drops
 
+    def consume_pending_descends(self):
+        with self._lock:
+            descends = self.pending_descends
+            self.pending_descends = []
+            return descends
+
+    def consume_pending_purchases(self):
+        with self._lock:
+            purchases = self.pending_purchases
+            self.pending_purchases = []
+            return purchases
+
+    def send_purchase_result(self, client_id, message):
+        with self._lock:
+            player = self.players.get(client_id)
+            if player and player.get("socket"):
+                player["socket"].send({"type": "purchase_result", "message": message})
+
     def add_item_to_player(self, client_id, item_id):
         with self._lock:
             if client_id in self.players:
@@ -333,6 +381,28 @@ class GameServer:
         with self._lock:
             self.items_snapshot = {f"{x},{y}": v for (x, y), v in items.items()}
 
+    def set_world_state(
+        self, floor_number=None, shared_bytes=None, objective=_UNSET
+    ):
+        with self._lock:
+            if floor_number is not None:
+                self.floor_number = floor_number
+            if shared_bytes is not None:
+                self.shared_bytes = shared_bytes
+            if objective is not _UNSET:
+                self.objective = objective
+
+    def add_shared_bytes(self, amount):
+        with self._lock:
+            self.shared_bytes = max(0, self.shared_bytes + int(amount))
+            return self.shared_bytes
+
+    def add_event(self, event):
+        with self._lock:
+            if event and event not in self.events:
+                self.events.append(event)
+                self.events = self.events[-20:]
+
     # --- broadcast thread ---
 
     def _broadcast_loop(self):
@@ -343,12 +413,17 @@ class GameServer:
             with self._lock:
                 state = {
                     "type": "state",
+                    "seed": self.seed,
                     "players": {
                         cid: {k: v for k, v in p.items() if k != "socket"}
                         for cid, p in self.players.items()
                     },
                     "doors": self.doors_snapshot,
                     "items": self.items_snapshot,
+                    "floor": self.floor_number,
+                    "shared_bytes": self.shared_bytes,
+                    "objective": self.objective,
+                    "events": self.events[-10:],
                 }
                 dead_sockets = []
                 for cid, p in self.players.items():
@@ -426,3 +501,9 @@ class GameClient:
 
     def send_toggle_light(self):
         self._stream.send({"type": "toggle_light"})
+
+    def send_descend(self):
+        self._stream.send({"type": "descend"})
+
+    def send_purchase(self, item_id):
+        self._stream.send({"type": "purchase", "item_id": item_id})
