@@ -191,9 +191,16 @@ def main():
             "terminal_actions": ["Execute objective", "Leave terminal"],
         }
 
-    def load_floor(number, seed):
+    def get_player_count():
+        if net_server is not None:
+            return max(1, len(net_server.get_players_snapshot()))
+        return 1
+
+    def load_floor(number, seed, player_count=None):
         nonlocal dungeon, doors, items, objective
-        dungeon, doors, items = build_floor_dungeon(number, seed)
+        if player_count is None:
+            player_count = get_player_count()
+        dungeon, doors, items = build_floor_dungeon(number, seed, player_count)
         objective = make_floor_objective(number, items)
 
     def narrative_for_floor(number, objective_data=None):
@@ -272,6 +279,7 @@ def main():
             floor_number=floor_number,
             shared_bytes=shared_bytes,
             objective=objective,
+            player_count=get_player_count(),
         )
         net_server.start()
         net_client = GameClient()
@@ -386,7 +394,7 @@ def main():
             objective = None
         else:
             active_seed = seed_rng.randint(1, 999999)
-            load_floor(floor_number, active_seed)
+            load_floor(floor_number, active_seed, get_player_count())
         doors = {}
         discovered.clear()
         floor_tiles = [
@@ -437,6 +445,7 @@ def main():
                 floor_number=floor_number,
                 shared_bytes=shared_bytes,
                 objective=objective,
+                player_count=get_player_count(),
             )
         sync_world_ui()
 
@@ -494,12 +503,15 @@ def main():
             floor_number = msg.get("floor", floor_number)
             shared_bytes = msg.get("shared_bytes", shared_bytes)
             objective = msg.get("objective")
+            player_count = msg.get("player_count", 1)
             if seed == LOBBY_SEED:
                 dungeon, doors, items = build_lobby_dungeon()
             elif seed == SHOP_SEED:
                 dungeon, doors, items = build_shop_dungeon()
             else:
-                dungeon, doors, items = build_floor_dungeon(floor_number, seed)
+                dungeon, doors, items = build_floor_dungeon(
+                    floor_number, seed, player_count
+                )
             if msg.get("reconnect"):
                 you = msg["you"]
                 players[local_client_id] = {
@@ -572,7 +584,9 @@ def main():
                     dungeon, doors, items = build_shop_dungeon()
                 else:
                     dungeon, doors, items = build_floor_dungeon(
-                        msg.get("floor", floor_number), active_seed
+                        msg.get("floor", floor_number),
+                        active_seed,
+                        msg.get("player_count", 1),
                     )
                 doors = {}
             floor_number = msg.get("floor", floor_number)
