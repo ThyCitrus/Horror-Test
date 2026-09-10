@@ -54,6 +54,8 @@ class TerminalUI:
         on_drop_item=None,
         on_shop_purchase=None,
         on_objective_action=None,
+        on_equip_item=None,
+        on_deposit_loot=None,
     ):
         self.font = font
         self.bold_font = bold_font
@@ -103,6 +105,8 @@ class TerminalUI:
         self.on_drop_item = on_drop_item
         self.on_shop_purchase = on_shop_purchase
         self.on_objective_action = on_objective_action
+        self.on_equip_item = on_equip_item
+        self.on_deposit_loot = on_deposit_loot
         self.objective = None
         self.floor_number = 0
         self.shared_bytes = None
@@ -113,6 +117,9 @@ class TerminalUI:
         self.logs.append((text, color))
         if len(self.logs) > 22:
             self.logs.pop(0)
+
+    def clear_logs(self):
+        self.logs = []
 
     def set_options(self, options, colors=None):
         self.options = options
@@ -331,6 +338,7 @@ class TerminalUI:
 
     def add_system_event(self, text, lore=None):
         """Show a narrative event and optionally persist it on the active save."""
+        self.clear_logs()
         self.add_log(f"[SYSTEM] {text}", (130, 220, 255))
         if self.active_character:
             add_character_event(self.active_character, text)
@@ -500,7 +508,15 @@ class TerminalUI:
                         if self.on_drop_item:
                             self.on_drop_item(self.inventory_index)
                         self.inventory_index = 0
-                if event.key == pygame.K_RETURN:
+                    elif event.key == pygame.K_RETURN:
+                        item_id = (self.current_inventory_items or [])[self.inventory_index]
+                        if self.on_equip_item:
+                            self.set_transient(
+                                self.on_equip_item(item_id),
+                                (80, 255, 80),
+                                duration_ms=1400,
+                            )
+                if event.key == pygame.K_RETURN and count == 0:
                     self.return_to_playing()
             return
 
@@ -662,6 +678,13 @@ class TerminalUI:
         elif self.state == "SHOP":
             if sel == len(self.options) - 1:
                 self.return_to_playing()
+            elif sel == len(self.options) - 2 and self.on_deposit_loot:
+                self.set_transient(
+                    self.on_deposit_loot(),
+                    (80, 255, 80),
+                    duration_ms=1600,
+                )
+                self.open_shop(self.active_character, self.shared_bytes)
             elif self.on_shop_purchase:
                 item_ids = ["Flashlight", "Lantern", "Map"]
                 message = self.on_shop_purchase(item_ids[sel])
@@ -707,6 +730,7 @@ class TerminalUI:
         player_pos=None,
         other_players=None,
         local_items=None,
+        local_loot=None,
         interact_prompt=None,
         objective=None,
         floor_number=None,
@@ -885,9 +909,27 @@ class TerminalUI:
                     y += line_height
                 y += 5
                 hint_lbl = self.font.render(
-                    "[Up/Down] Select   [Backspace] Drop   [Enter] Back", True, TEXT_DIM
+                    "[Up/Down] Select   [Enter] Equip   [Backspace] Drop", True, TEXT_DIM
                 )
                 surface.blit(hint_lbl, (rect.x + 20, y))
+            loot = local_loot or []
+            if loot:
+                y += line_height
+                surface.blit(
+                    self.bold_font.render("Floor loot (deposit at shop):", True, (255, 220, 120)),
+                    (rect.x + 20, y),
+                )
+                y += line_height
+                for entry in loot[-8:]:
+                    surface.blit(
+                        self.font.render(
+                            f"  {entry.get('name', 'Data')} — {entry.get('value', 0)} bytes",
+                            True,
+                            TEXT_WHITE,
+                        ),
+                        (rect.x + 20, y),
+                    )
+                    y += line_height
             y += 10
 
         elif self.state == "TERMINAL_GAME":
@@ -1026,8 +1068,10 @@ class TerminalUI:
         self.state = "PLAYING"
         self.set_options(["Inventory", "Map"])
 
-    def open_shop(self, character=None, shared_bytes=None):
+    def open_shop(self, character=None, shared_bytes=None, on_deposit=None):
         self.state = "SHOP"
+        if on_deposit is not None:
+            self.on_deposit_loot = on_deposit
         free_light = character is not None and not character.get(
             "shop_free_light_used", False
         )
@@ -1039,6 +1083,7 @@ class TerminalUI:
                 f"Flashlight — {light_price}",
                 f"Lantern — {light_price}",
                 "Map — 100 bytes",
+                "Deposit floor loot",
                 "Leave terminal",
             ]
         )

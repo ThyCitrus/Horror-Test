@@ -89,6 +89,7 @@ class GameServer:
         self.pending_drops = []  # [(client_id, index), ...]
         self.pending_descends = []
         self.pending_purchases = []
+        self.pending_deposits = []
         self.items_snapshot = {}
         self.floor_number = floor_number
         self.shared_bytes = shared_bytes
@@ -173,6 +174,9 @@ class GameServer:
                     elif mtype == "purchase" and client_id:
                         with self._lock:
                             self.pending_purchases.append((client_id, msg.get("item_id")))
+                    elif mtype == "deposit" and client_id:
+                        with self._lock:
+                            self.pending_deposits.append(client_id)
                     elif mtype == "toggle_light" and client_id:
                         with self._lock:
                             if client_id in self.players:
@@ -267,6 +271,7 @@ class GameServer:
                 "look_angle": 0.0,
                 "socket": stream,
                 "items": [],
+                "loot": [],
                 "equipped_light": None,
                 "light_on": False,
             }
@@ -358,6 +363,12 @@ class GameServer:
             self.pending_purchases = []
             return purchases
 
+    def consume_pending_deposits(self):
+        with self._lock:
+            deposits = self.pending_deposits
+            self.pending_deposits = []
+            return deposits
+
     def send_purchase_result(self, client_id, message):
         with self._lock:
             player = self.players.get(client_id)
@@ -368,6 +379,11 @@ class GameServer:
         with self._lock:
             if client_id in self.players:
                 self.players[client_id]["items"].append(item_id)
+
+    def add_loot_to_player(self, client_id, loot):
+        with self._lock:
+            if client_id in self.players:
+                self.players[client_id]["loot"].append(loot)
 
     def set_equipped_light(self, client_id, item_id):
         with self._lock:
@@ -518,3 +534,6 @@ class GameClient:
 
     def send_purchase(self, item_id):
         self._stream.send({"type": "purchase", "item_id": item_id})
+
+    def send_deposit(self):
+        self._stream.send({"type": "deposit"})
