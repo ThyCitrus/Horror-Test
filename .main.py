@@ -424,7 +424,6 @@ def main():
                 items.pop(active_objective_pos, None)
                 active_objective_pos = None
             return "Puzzle solved; upload request sent to host."
-        if objective["type"] == "long" and objective["progress"] < objective["required"]:
         if (
             objective["type"] == "long"
             and objective["progress"] < objective["required"]
@@ -1058,10 +1057,6 @@ def main():
                         not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
                         and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
                     ):
-                    if blocking_item not in (
-                        OBJECTIVE_TERMINAL,
-                        SHOP_TERMINAL,
-                    ) and is_walkable(dungeon, doors, target_x, target_y, dx, dy):
                         player_x, player_y = target_x, target_y
 
                 time_since_last_move = 0
@@ -1240,10 +1235,6 @@ def main():
                     not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
                     and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
                 ):
-                if blocking_item not in (
-                    OBJECTIVE_TERMINAL,
-                    SHOP_TERMINAL,
-                ) and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
                     net_server.update_player_position(
                         cid, target_x, target_y, pdata["facing"]
                     )
