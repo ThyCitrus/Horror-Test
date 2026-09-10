@@ -19,6 +19,24 @@ SHOP_TERMINAL = "ShopTerminal"
 OBJECTIVE_TERMINAL = "ObjectiveTerminal"
 DATA_SCRAP = "DataScrap"
 ROAMING_SIGNAL = "RoamingSignal"
+OBJECTIVE_GLYPH = "◙"
+
+LOOT_TABLE = (
+    ("Calculators / Digital Watches", ((100, 70), (500, 25), (1_000, 5))),
+    ("Smart Lightbulb / Thermostat Board", ((1_000, 60), (4_000, 30), (16_000, 10))),
+    ("Floppy Disks", ((1_440, 80), (2_880, 20))),
+    ("CD-ROM / Audio Discs", ((10_000, 60), (50_000, 40))),
+    ("Old MP3 Player / Digital Camera", ((100_000, 50), (500_000, 30), (2_000_000, 15), (8_000_000, 5))),
+    ("Wi-Fi Router / Smart TV Dongle", ((512_000, 60), (2_000_000, 30), (8_000_000, 10))),
+    ("Game Console Memory Cards", ((8_000, 50), (64_000, 35), (512_000, 15))),
+    ("USB Flash Drives", ((1_000_000, 50), (4_000_000, 35), (16_000_000, 15))),
+    ("DRAM / Laptop RAM Sticks", ((4_000_000, 50), (8_000_000, 30), (16_000_000, 15), (32_000_000, 5))),
+    ("Commercial SSDs / Memory Cards", ((32_000_000, 60), (64_000_000, 25), (128_000_000, 10), (256_000_000, 5))),
+    ("Old Arcade System Board", ((16_000_000, 70), (32_000_000, 20), (64_000_000, 10))),
+    ("Drone Flight Controller", ((8_000_000, 50), (32_000_000, 35), (64_000_000, 15))),
+    ("Damaged External Hard Drive", ((250_000_000, 60), (500_000_000, 30), (1_000_000_000, 10))),
+    ("Corrupted Server Drive", ((500_000_000, 70), (1_000_000_000, 25), (2_000_000_000, 5))),
+)
 
 TILE_CHAR_MAP = {
     "#": WALL,
@@ -90,6 +108,9 @@ def build_shop_dungeon():
     """Build the compact pregame shop used when a new save starts."""
     tiles = {}
     carve_rect(tiles, -10, -10, 21, 20)
+    for x, y in ((-6, -6), (6, -6), (-6, 5), (6, 5), (-2, 1), (2, 1)):
+        if tiles.get((x, y)) == FLOOR:
+            tiles[(x, y)] = WALL
     tiles[(0, 7)] = LADDER
     items = {(0, -9): {"item_id": SHOP_TERMINAL}}
     return tiles, {}, items
@@ -107,43 +128,55 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
         return tiles, {}, {}
     ladder_positions = [pos for pos, tile in tiles.items() if tile == LADDER]
     occupied = set(ladder_positions)
-    objective_pos = rng.choice([pos for pos in floors if pos not in occupied] or floors)
+    wall_mounts = [
+        pos for pos in floors
+        if any(tiles.get((pos[0] + dx, pos[1] + dy)) == WALL for dx, dy in DIRECTIONS.values())
+    ]
+    wall_mounts = [pos for pos in wall_mounts if pos not in occupied]
     shop_floors_visited = max(0, (floor_number - 1) // 3)
-    if shop_floors_visited and floor_number % 3 == 1:
-        objective_type = "roaming"
-    else:
-        objective_type = "fast" if rng.random() < 0.75 else "long"
     items = {}
-    if objective_type in ("fast", "long"):
-        items[objective_pos] = {"item_id": OBJECTIVE_TERMINAL}
-    if objective_type == "roaming":
-        signal_pos = rng.choice(
-            [pos for pos in floors if pos not in occupied and pos != objective_pos]
-            or floors
-        )
-        items[signal_pos] = {"item_id": ROAMING_SIGNAL}
+    objective_count = max(1, math.ceil((14 * max(1, int(player_count)) + floor_number) / 10))
+    objective_positions = rng.sample(
+        wall_mounts or [pos for pos in floors if pos not in occupied] or floors,
+        min(objective_count, len(wall_mounts or floors)),
+    )
+    roaming_count = min(shop_floors_visited, len(objective_positions))
+    for index, objective_pos in enumerate(objective_positions):
+        if index < roaming_count:
+            objective_type = "roaming"
+            item_id = ROAMING_SIGNAL
+        else:
+            objective_type = "fast" if rng.random() < 0.75 else "long"
+            item_id = OBJECTIVE_TERMINAL
+        items[objective_pos] = {
+            "item_id": item_id,
+            "objective_type": objective_type,
+        }
+    objective_type = items[objective_positions[0]]["objective_type"]
     scrap_pool = [
         pos for pos in floors
         if pos not in occupied and pos not in items
     ]
     rng.shuffle(scrap_pool)
     scrap_count = max(3 if objective_type == "long" else 2, min(5, 2 + floor_number // 2))
-    scrap_values = (
-        (100, 70),
-        (500, 25),
-        (1_000, 5),
-        (10_000, 2 if shop_floors_visited else 0),
-        (100_000, 1 if shop_floors_visited >= 2 else 0),
-    )
-    weighted_values = [
-        value
-        for value, weight in scrap_values
-        for _ in range(weight)
-    ]
     for pos in scrap_pool[:scrap_count]:
+        tier_index = min(
+            len(LOOT_TABLE) - 1,
+            rng.randrange(max(1, 4 + shop_floors_visited)),
+        )
+        loot_name, values = LOOT_TABLE[tier_index]
+        total_weight = sum(weight for _, weight in values)
+        roll = rng.randrange(total_weight)
+        loot_value = values[-1][0]
+        for value, weight in values:
+            if roll < weight:
+                loot_value = value
+                break
+            roll -= weight
         items[pos] = {
             "item_id": DATA_SCRAP,
-            "value": rng.choice(weighted_values or [100]),
+            "name": loot_name,
+            "value": loot_value,
         }
     return tiles, {}, items
 

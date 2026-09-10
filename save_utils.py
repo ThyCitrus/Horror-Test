@@ -13,6 +13,8 @@ def normalize_character(character: dict) -> dict:
     character.setdefault("notepad", [])
     character.setdefault("events", [])
     character.setdefault("items", [])
+    character.setdefault("loot", [])
+    character.setdefault("equipped_light", None)
     character.setdefault("objective", None)
     return character
 

@@ -20,6 +20,7 @@ from dungeon_gen import (
     SHOP_SEED,
     SHOP_TERMINAL,
     OBJECTIVE_TERMINAL,
+    OBJECTIVE_GLYPH,
     DATA_SCRAP,
     ROAMING_SIGNAL,
     LADDER,
@@ -88,11 +89,13 @@ ITEM_NAMES = {
 }  # item_id -> display name, falls back to item_id
 ITEM_GLYPHS = {
     SHOP_TERMINAL: "‰",
-    OBJECTIVE_TERMINAL: "T",
+    OBJECTIVE_TERMINAL: OBJECTIVE_GLYPH,
     DATA_SCRAP: "$",
     ROAMING_SIGNAL: "S",
 }
 TOGGLE_LIGHT_KEY = pygame.BUTTON_LEFT
+SHOP_COLOR = (205, 70, 70)
+LADDER_COLOR = (255, 255, 255)
 LOOK_SEND_INTERVAL_MS = (
     100  # throttle for continuous angle sync, separate from discrete facing changes
 )
@@ -160,12 +163,25 @@ def main():
 
     def make_floor_objective(number, floor_items):
         objective_type = ("fast", "long", "roaming")[(number - 1) % 3]
+        target_count = sum(
+            item["item_id"] in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
+            for item in floor_items.values()
+        )
+        game_name = {
+            "fast": ["Arrow Sequence", "Number Calibration", "Sine Wave Tuner"][
+                (number - 1) % 3
+            ],
+            "long": ["Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"][
+                (number - 1) % 3
+            ],
+            "roaming": "Hotspot Signal Tracker",
+        }[objective_type]
         if objective_type == "long":
-            title, required = "Recover three data fragments", 3
+            title, required = f"{game_name}: recover three data fragments", 3
         elif objective_type == "roaming":
-            title, required = "Locate the roaming signal", 1
+            title, required = game_name, 1
         else:
-            title, required = "Complete the fast terminal handshake", 1
+            title, required = game_name, 1
         target = next(
             (
                 pos
@@ -178,16 +194,15 @@ def main():
         return {
             "id": f"floor-{number}-{objective_type}",
             "type": objective_type,
+            "game": game_name,
             "title": title,
             "progress": 0,
             "required": required,
+            "target_count": target_count,
+            "target_progress": 0,
             "target": list(target) if target else None,
             "completed": False,
-            "terminal_prompt": {
-                "fast": "FAST HANDSHAKE // EXECUTE",
-                "long": "ARCHIVE UPLOAD // REQUIRE FRAGMENTS",
-                "roaming": "SIGNAL LOCK // COMPLETE",
-            }[objective_type],
+            "terminal_prompt": f"{game_name.upper()} // EXECUTE",
             "terminal_actions": ["Execute objective", "Leave terminal"],
         }
 
@@ -225,6 +240,30 @@ def main():
 
     def sync_world_ui():
         terminal.set_world_state(floor_number, objective, shared_bytes)
+
+    def equip_item(item_id):
+        character = terminal.active_character
+        if item_id not in LIGHT_ITEM_IDS:
+            return "Only light sources can be equipped."
+        if character is not None and item_id in character.get("items", []):
+            character["equipped_light"] = item_id
+            save_json(character, slot_path(character["slot"]))
+            return f"Equipped {ITEM_NAMES[item_id]}."
+        return "Light source is not in inventory."
+
+    def deposit_loot():
+        if terminal.network_mode and net_server is None:
+            if net_client:
+                net_client.send_deposit()
+            return "Deposit request sent to Archive."
+        character = terminal.active_character
+        if not character or not character.get("loot"):
+            return "No floor loot to deposit."
+        deposited = sum(entry.get("value", 0) for entry in character["loot"])
+        character["loot"] = []
+        character["bytes"] = shared_bytes + deposited
+        save_json(character, slot_path(character["slot"]))
+        return f"Deposited loot for {deposited} bytes."
 
     def handle_slot_hover(slot_info, get_current=False):
         nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors, items, floor_number, objective, shared_bytes
@@ -371,8 +410,15 @@ def main():
             return "No active objective."
         if objective["type"] == "long" and objective["progress"] < objective["required"]:
             return "Upload blocked: recover more data fragments."
-        objective["progress"] = objective["required"]
-        objective["completed"] = True
+        objective["target_progress"] = min(
+            objective.get("target_count", 1),
+            objective.get("target_progress", 0) + 1,
+        )
+        objective["completed"] = objective["target_progress"] >= objective.get(
+            "target_count", 1
+        )
+        if objective["completed"]:
+            objective["progress"] = objective["required"]
         text = f"Objective complete: {objective['title']}."
         terminal.add_system_event(text)
         if terminal.active_character:
@@ -459,6 +505,8 @@ def main():
         on_drop_item=drop_item,
         on_shop_purchase=purchase_shop_item,
         on_objective_action=complete_objective,
+        on_equip_item=equip_item,
+        on_deposit_loot=deposit_loot,
     )
 
     def sync_players_from_state(state_players):
@@ -475,6 +523,7 @@ def main():
                     "alive": pdata["alive"],
                     "connected": pdata["connected"],
                     "items": list(pdata.get("items", [])),
+                    "loot": list(pdata.get("loot", [])),
                     "equipped_light": pdata.get("equipped_light"),
                     "light_on": pdata.get("light_on", False),
                     "look_angle": pdata.get("look_angle", 0.0),
@@ -489,6 +538,7 @@ def main():
                 p["alive"] = pdata["alive"]
                 p["connected"] = pdata["connected"]
                 p["items"] = list(pdata.get("items", []))
+                p["loot"] = list(pdata.get("loot", []))
                 p["equipped_light"] = pdata.get("equipped_light")
                 if cid != local_client_id:
                     p["light_on"] = pdata.get("light_on", False)
@@ -525,6 +575,7 @@ def main():
                     "alive": True,
                     "connected": True,
                     "items": [],
+                    "loot": [],
                     "equipped_light": None,
                     "light_on": False,
                     "look_angle": 0.0,
@@ -555,6 +606,7 @@ def main():
                 "alive": True,
                 "connected": True,
                 "items": [],
+                "loot": [],
                 "equipped_light": None,
                 "light_on": False,
                 "look_angle": look_angle,
@@ -743,11 +795,19 @@ def main():
                     item_id = items[pos]["item_id"]
                     if item_id == SHOP_TERMINAL:
                         if terminal.network_mode and terminal.active_character:
-                            terminal.open_shop(terminal.active_character)
+                            terminal.open_shop(
+                                terminal.active_character,
+                                shared_bytes if terminal.network_mode else None,
+                                on_deposit=deposit_loot,
+                            )
                         elif terminal.network_mode:
                             net_client.send_interact(*pos)
                         else:
-                            terminal.open_shop(terminal.active_character)
+                            terminal.open_shop(
+                                terminal.active_character,
+                                shared_bytes if terminal.network_mode else None,
+                                on_deposit=deposit_loot,
+                            )
                     elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
                         if terminal.network_mode:
                             net_client.send_interact(*pos)
@@ -764,8 +824,12 @@ def main():
                         item = items.pop(pos)
                         if item_id == DATA_SCRAP:
                             value = item.get("value", 10)
-                            shared_bytes += value
-                            terminal.active_character["bytes"] = shared_bytes
+                            terminal.active_character.setdefault("loot", []).append(
+                                {
+                                    "name": item.get("name", "Recovered data"),
+                                    "value": value,
+                                }
+                            )
                             if objective and objective["type"] == "long":
                                 objective["progress"] = min(
                                     objective["required"], objective["progress"] + 1
@@ -777,7 +841,7 @@ def main():
                                     slot_path(terminal.active_character["slot"]),
                                 )
                             terminal.add_system_event(
-                                f"Recovered {value} data bytes.",
+                                f"Recovered {item.get('name', 'data scrap')} ({value} bytes)."
                             )
                         else:
                             terminal.active_character["items"].append(item_id)
@@ -789,7 +853,13 @@ def main():
                             slot_path(terminal.active_character["slot"]),
                         )
                 elif pos in dungeon and dungeon[pos] == LADDER:
-                    if terminal.network_mode:
+                    if not objective or not objective.get("completed"):
+                        terminal.set_transient(
+                            "Ladder locked: complete the objective first.",
+                            (255, 180, 80),
+                            duration_ms=1600,
+                        )
+                    elif terminal.network_mode:
                         net_client.send_descend()
                     else:
                         advance_floor()
@@ -896,7 +966,11 @@ def main():
                     net_client.send_input(dx, dy)
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
-                    if is_walkable(dungeon, doors, target_x, target_y, dx, dy):
+                    blocking_item = items.get((target_x, target_y), {}).get("item_id")
+                    if (
+                        blocking_item not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL)
+                        and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
+                    ):
                         player_x, player_y = target_x, target_y
 
                 time_since_last_move = 0
@@ -929,21 +1003,19 @@ def main():
                     item = items.pop(pos)
                     item_id = item["item_id"]
                     if item_id == DATA_SCRAP:
-                        shared_bytes += item.get("value", 10)
-                        if terminal.active_character:
-                            terminal.active_character["bytes"] = shared_bytes
+                        net_server.add_loot_to_player(
+                            cid,
+                            {
+                                "name": item.get("name", "Recovered data"),
+                                "value": item.get("value", 10),
+                            },
+                        )
                         if objective and objective["type"] == "long":
                             objective["progress"] = min(
                                 objective["required"], objective["progress"] + 1
                             )
-                        if terminal.active_character:
-                            terminal.active_character["objective"] = objective
-                            save_json(
-                                terminal.active_character,
-                                slot_path(terminal.active_character["slot"]),
-                            )
                         net_server.set_world_state(
-                            shared_bytes=shared_bytes, objective=objective
+                            objective=objective
                         )
                     else:
                         net_server.add_item_to_player(cid, item_id)
@@ -983,9 +1055,26 @@ def main():
                 if item_id in LIGHT_ITEM_IDS:
                     net_server.set_equipped_light(cid, item_id)
                 net_server.send_purchase_result(cid, f"Purchased {ITEM_NAMES[item_id]}.")
+            for cid in net_server.consume_pending_deposits():
+                player_state = net_server.get_players_snapshot().get(cid)
+                if not player_state:
+                    continue
+                loot_value = sum(entry.get("value", 0) for entry in player_state.get("loot", []))
+                if loot_value <= 0:
+                    net_server.send_purchase_result(cid, "No floor loot to deposit.")
+                    continue
+                with net_server._lock:
+                    net_server.players[cid]["loot"] = []
+                net_server.add_shared_bytes(loot_value)
+                shared_bytes = net_server.shared_bytes
+                net_server.send_purchase_result(
+                    cid, f"Deposited loot for {loot_value} bytes."
+                )
             descended = False
             for cid in net_server.consume_pending_descends():
                 if descended:
+                    continue
+                if not objective or not objective.get("completed"):
                     continue
                 pdata = net_server.get_players_snapshot().get(cid)
                 ladder = next(
@@ -1013,7 +1102,11 @@ def main():
                 if mdx == 0 and mdy == 0:
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
-                if is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
+                blocking_item = items.get((target_x, target_y), {}).get("item_id")
+                if (
+                    blocking_item not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL)
+                    and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
+                ):
                     net_server.update_player_position(
                         cid, target_x, target_y, pdata["facing"]
                     )
@@ -1090,7 +1183,10 @@ def main():
             elif dungeon.get(face_pos) == DOOR:
                 interact_prompt = "[E] Open/close door"
             elif dungeon.get(face_pos) == LADDER:
-                interact_prompt = "[E] Descend to facility"
+                if objective and objective.get("completed"):
+                    interact_prompt = "[E] Descend to facility"
+                else:
+                    interact_prompt = "[E] Ladder locked: complete objective"
 
             if terminal.network_mode and local_client_id in players:
                 equipped_light = players[local_client_id].get("equipped_light")
@@ -1354,11 +1450,20 @@ def main():
                         (dist - i * 0.1, draw_char, seg_color, rect_center, font_size)
                     )
             else:
-                base_tile_color = (
-                    ITEM_COLOR
-                    if (wx, wy) in items
-                    else WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
-                )
+                if char == LADDER:
+                    base_tile_color = LADDER_COLOR
+                elif (wx, wy) in items and items[(wx, wy)]["item_id"] == SHOP_TERMINAL:
+                    base_tile_color = SHOP_COLOR
+                elif active_seed == SHOP_SEED:
+                    base_tile_color = (
+                        (155, 55, 55) if is_wall_like else (72, 32, 32)
+                    )
+                else:
+                    base_tile_color = (
+                        ITEM_COLOR
+                        if (wx, wy) in items
+                        else WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
+                    )
                 color = tuple(int(c * brightness) for c in base_tile_color)
                 cx = offset_x + (wx - camera_start_x) * cell_spacing_x
                 cy = offset_y + (wy - camera_start_y) * cell_spacing_y
@@ -1451,10 +1556,13 @@ def main():
         terminal_rect = pygame.Rect(map_width, 0, panel_width, screen.get_height())
         if terminal.network_mode:
             local_items_for_render = players.get(local_client_id, {}).get("items", [])
+            local_loot_for_render = players.get(local_client_id, {}).get("loot", [])
         elif terminal.active_character:
             local_items_for_render = terminal.active_character["items"]
+            local_loot_for_render = terminal.active_character.get("loot", [])
         else:
             local_items_for_render = []
+            local_loot_for_render = []
 
         sync_world_ui()
         terminal.render(
@@ -1465,6 +1573,7 @@ def main():
             (px, py),
             other_players=other_players_for_hud,
             local_items=local_items_for_render,
+            local_loot=local_loot_for_render,
             interact_prompt=interact_prompt,
             objective=objective,
             floor_number=floor_number,
