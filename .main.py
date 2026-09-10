@@ -171,9 +171,11 @@ def main():
             "fast": ["Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"][
                 (number - 1) % 3
             ],
-            "long": ["Grid Fill/Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"][
-                (number - 1) % 3
-            ],
+            "long": [
+                "Grid Fill/Flow Puzzle",
+                "Memory Pattern / Simon",
+                "Active Hold / Pong",
+            ][(number - 1) % 3],
             "roaming": "Hotspot Signal Tracker",
         }[objective_type]
         if objective_type == "long":
@@ -419,7 +421,6 @@ def main():
             if net_client:
                 net_client.send_objective_complete()
             return "Puzzle solved; upload request sent to host."
-        if objective["type"] == "long" and objective["progress"] < objective["required"]:
         if (
             objective["type"] == "long"
             and objective["progress"] < objective["required"]
@@ -618,7 +619,11 @@ def main():
         elif mtype == "objective_start":
             remote_objective = msg.get("objective") or objective
             target = msg.get("target")
-            if remote_objective and remote_objective.get("type") == "roaming" and target:
+            if (
+                remote_objective
+                and remote_objective.get("type") == "roaming"
+                and target
+            ):
                 if terminal.network_mode and local_client_id in players:
                     local_position = (
                         players[local_client_id]["x"],
@@ -874,7 +879,9 @@ def main():
                                 if candidates:
                                     target = max(
                                         candidates,
-                                        key=lambda candidate: abs(candidate[0] - player_x)
+                                        key=lambda candidate: abs(
+                                            candidate[0] - player_x
+                                        )
                                         + abs(candidate[1] - player_y),
                                     )
                                     terminal.start_signal_tracker(
@@ -992,12 +999,9 @@ def main():
             start_host()
 
         # --- movement input ---
-        can_move = (
-            not terminal.is_modal_game()
-            and (
-                (terminal.active_character and not terminal.network_mode)
-                or (terminal.network_mode and local_client_id in players)
-            )
+        can_move = not terminal.is_modal_game() and (
+            (terminal.active_character and not terminal.network_mode)
+            or (terminal.network_mode and local_client_id in players)
         )
         if can_move and terminal.state == "PLAYING" and time_since_last_move >= 150:
             keys = pygame.key.get_pressed()
@@ -1037,11 +1041,6 @@ def main():
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
                     blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                    if (
-                        blocking_item
-                        not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
-                        and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
-                    ):
                     if blocking_item not in (
                         OBJECTIVE_TERMINAL,
                         SHOP_TERMINAL,
@@ -1095,7 +1094,9 @@ def main():
                             if candidates:
                                 target = max(
                                     candidates,
-                                    key=lambda candidate: abs(candidate[0] - player_pos[0])
+                                    key=lambda candidate: abs(
+                                        candidate[0] - player_pos[0]
+                                    )
                                     + abs(candidate[1] - player_pos[1]),
                                 )
                         net_server.send_objective_start(cid, objective, target)
@@ -1212,11 +1213,6 @@ def main():
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
                 blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                if (
-                    blocking_item
-                    not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
-                    and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
-                ):
                 if blocking_item not in (
                     OBJECTIVE_TERMINAL,
                     SHOP_TERMINAL,
