@@ -168,10 +168,10 @@ def main():
             for item in floor_items.values()
         )
         game_name = {
-            "fast": ["Arrow Sequence", "Number Calibration", "Sine Wave Tuner"][
+            "fast": ["Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"][
                 (number - 1) % 3
             ],
-            "long": ["Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"][
+            "long": ["Grid Fill/Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"][
                 (number - 1) % 3
             ],
             "roaming": "Hotspot Signal Tracker",
@@ -182,6 +182,8 @@ def main():
             title, required = game_name, 1
         else:
             title, required = game_name, 1
+        if objective_type == "roaming":
+            target_count = 1
         target = next(
             (
                 pos
@@ -207,7 +209,6 @@ def main():
             "target": list(target) if target else None,
             "completed": False,
             "terminal_prompt": f"{game_name.upper()} // EXECUTE",
-            "terminal_actions": ["Execute objective", "Leave terminal"],
         }
 
     def get_player_count():
@@ -412,6 +413,13 @@ def main():
         nonlocal objective
         if not objective:
             return "No active objective."
+        if objective.get("completed"):
+            return "Objective already complete."
+        if terminal.network_mode and net_server is None:
+            if net_client:
+                net_client.send_objective_complete()
+            return "Puzzle solved; upload request sent to host."
+        if objective["type"] == "long" and objective["progress"] < objective["required"]:
         if (
             objective["type"] == "long"
             and objective["progress"] < objective["required"]
@@ -426,6 +434,10 @@ def main():
         )
         if objective["completed"]:
             objective["progress"] = objective["required"]
+            for item_pos, item_data in list(items.items()):
+                if item_data.get("item_id") == ROAMING_SIGNAL:
+                    items.pop(item_pos, None)
+                    break
         text = f"Objective complete: {objective['title']}."
         terminal.add_system_event(text)
         if terminal.active_character:
@@ -603,6 +615,23 @@ def main():
                 duration_ms=1800,
             )
 
+        elif mtype == "objective_start":
+            remote_objective = msg.get("objective") or objective
+            target = msg.get("target")
+            if remote_objective and remote_objective.get("type") == "roaming" and target:
+                if terminal.network_mode and local_client_id in players:
+                    local_position = (
+                        players[local_client_id]["x"],
+                        players[local_client_id]["y"],
+                    )
+                else:
+                    local_position = (player_x, player_y)
+                terminal.start_signal_tracker(remote_objective, target, local_position)
+            elif remote_objective:
+                terminal.open_objective_terminal(remote_objective)
+            if net_client:
+                net_client.send_input(0, 0)
+
         elif mtype == "join_ack":
             is_host = net_server is not None
             players[local_client_id] = {
@@ -779,6 +808,14 @@ def main():
                 running = False
             elif terminal.state in TEXT_INPUT_STATES:
                 terminal.handle_input(event)
+            elif terminal.is_modal_game():
+                terminal.handle_input(event)
+            elif (
+                terminal.signal_tracker
+                and event.type == pygame.KEYDOWN
+                and event.key in (pygame.K_ESCAPE, pygame.K_q)
+            ):
+                terminal.handle_input(event)
             elif event.type == pygame.KEYDOWN and event.key in DIRECTION_KEYS:
                 pending_moves[event.key] = now
                 buffered_move = event.key
@@ -824,8 +861,25 @@ def main():
                         elif item_id == OBJECTIVE_TERMINAL:
                             terminal.open_objective_terminal(objective)
                         else:
-                            items.pop(pos)
-                            complete_objective()
+                            if objective and not objective.get("completed"):
+                                candidates = [
+                                    candidate
+                                    for candidate, tile in dungeon.items()
+                                    if tile == FLOOR
+                                    and candidate not in items
+                                    and abs(candidate[0] - player_x)
+                                    + abs(candidate[1] - player_y)
+                                    >= 6
+                                ]
+                                if candidates:
+                                    target = max(
+                                        candidates,
+                                        key=lambda candidate: abs(candidate[0] - player_x)
+                                        + abs(candidate[1] - player_y),
+                                    )
+                                    terminal.start_signal_tracker(
+                                        objective, target, (player_x, player_y)
+                                    )
                     elif item_id == DATA_SCRAP and terminal.network_mode:
                         net_client.send_pickup(*pos)
                     elif terminal.network_mode:
@@ -938,10 +992,14 @@ def main():
             start_host()
 
         # --- movement input ---
-        can_move = (terminal.active_character and not terminal.network_mode) or (
-            terminal.network_mode and local_client_id in players
+        can_move = (
+            not terminal.is_modal_game()
+            and (
+                (terminal.active_character and not terminal.network_mode)
+                or (terminal.network_mode and local_client_id in players)
+            )
         )
-        if can_move and terminal.state != "NAME_INPUT" and time_since_last_move >= 150:
+        if can_move and terminal.state == "PLAYING" and time_since_last_move >= 150:
             keys = pygame.key.get_pressed()
             candidates = [
                 (pending_moves.get(k, now), k) for k in DIRECTION_KEYS if keys[k]
@@ -979,6 +1037,11 @@ def main():
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
                     blocking_item = items.get((target_x, target_y), {}).get("item_id")
+                    if (
+                        blocking_item
+                        not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
+                        and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
+                    ):
                     if blocking_item not in (
                         OBJECTIVE_TERMINAL,
                         SHOP_TERMINAL,
@@ -987,10 +1050,21 @@ def main():
 
                 time_since_last_move = 0
 
+        if terminal.signal_tracker:
+            if terminal.network_mode and local_client_id in players:
+                terminal.update_signal_tracker(
+                    (players[local_client_id]["x"], players[local_client_id]["y"])
+                )
+            elif not terminal.network_mode:
+                terminal.update_signal_tracker((player_x, player_y))
+        terminal.update_objective_game(dt)
+
         # --- host-only: resolve pending interacts, door animation, and movement ---
         if net_server is not None:
             net_server.set_doors_snapshot(doors)
             net_server.set_items_snapshot(items)
+            for _cid in net_server.consume_pending_objective_completions():
+                complete_objective()
             for cid, ix, iy in net_server.consume_pending_interacts():
                 player_state = net_server.get_players_snapshot().get(cid)
                 if not player_state:
@@ -1005,13 +1079,26 @@ def main():
                     begin_door_toggle(door, pygame.time.get_ticks())
                 elif (ix, iy) in items:
                     item_id = items[(ix, iy)]["item_id"]
-                    if item_id == OBJECTIVE_TERMINAL:
-                        complete_objective()
-                        if objective and objective.get("completed"):
-                            items.pop((ix, iy), None)
-                    elif item_id == ROAMING_SIGNAL:
-                        complete_objective()
-                        items.pop((ix, iy), None)
+                    if item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                        player_pos = (player_state["x"], player_state["y"])
+                        target = None
+                        if item_id == ROAMING_SIGNAL:
+                            candidates = [
+                                candidate
+                                for candidate, tile in dungeon.items()
+                                if tile == FLOOR
+                                and candidate not in items
+                                and abs(candidate[0] - player_pos[0])
+                                + abs(candidate[1] - player_pos[1])
+                                >= 6
+                            ]
+                            if candidates:
+                                target = max(
+                                    candidates,
+                                    key=lambda candidate: abs(candidate[0] - player_pos[0])
+                                    + abs(candidate[1] - player_pos[1]),
+                                )
+                        net_server.send_objective_start(cid, objective, target)
             for cid, ix, iy in net_server.consume_pending_pickups():
                 pos = (ix, iy)
                 if pos in items:
@@ -1125,6 +1212,11 @@ def main():
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
                 blocking_item = items.get((target_x, target_y), {}).get("item_id")
+                if (
+                    blocking_item
+                    not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
+                    and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
+                ):
                 if blocking_item not in (
                     OBJECTIVE_TERMINAL,
                     SHOP_TERMINAL,

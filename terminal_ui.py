@@ -1,6 +1,7 @@
 import sys
 import math
 import array
+import random
 import pygame
 
 from save_utils import (
@@ -110,6 +111,9 @@ class TerminalUI:
         self.objective = None
         self.floor_number = 0
         self.shared_bytes = None
+        self.objective_game = None
+        self.signal_tracker = None
+        self._objective_callback_called = False
 
         self.load_start_menu()
 
@@ -350,11 +354,206 @@ class TerminalUI:
             )
 
     def open_objective_terminal(self, objective):
-        """Open the extensible terminal objective menu."""
+        """Start the objective's self-contained puzzle."""
         self.objective = objective
         self.state = "TERMINAL_GAME"
-        actions = objective.get("terminal_actions") or ["Run sequence", "Leave terminal"]
-        self.set_options(actions)
+        self._objective_callback_called = False
+        self._start_objective_game(objective)
+
+    def _start_objective_game(self, objective):
+        game = objective.get("game", "Arrow Sequence")
+        rng = random.Random(objective.get("id", game))
+        arrows = [pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT]
+        if game == "Arrow Sequence":
+            self.objective_game = {
+                "kind": "arrows",
+                "sequence": [rng.choice(arrows) for _ in range(6)],
+                "index": 0,
+            }
+        elif game in ("Sine Wave Tuner", "Sine Wave Signal Tuner"):
+            self.objective_game = {
+                "kind": "sine",
+                "values": [5, 5, 5],
+                "targets": [rng.randint(3, 8) for _ in range(3)],
+                "selected": 0,
+            }
+        elif game in ("Flow Puzzle", "Grid Fill/Flow Puzzle"):
+            width = height = 4
+            self.objective_game = {
+                "kind": "grid",
+                "width": width,
+                "height": height,
+                "cursor": [0, 0],
+                "visited": {(0, 0)},
+                "total": width * height,
+            }
+        elif game == "Number Calibration":
+            self.objective_game = {
+                "kind": "numbers",
+                "values": [0, 0, 0],
+                "targets": [rng.randint(2, 8) for _ in range(3)],
+                "selected": 0,
+            }
+        elif game == "Memory Pattern / Simon":
+            sequence = [rng.choice(arrows) for _ in range(5)]
+            self.objective_game = {
+                "kind": "simon",
+                "sequence": sequence,
+                "index": 0,
+                "show_index": 0,
+                "show_until": pygame.time.get_ticks() + 650,
+                "phase": "show",
+            }
+        elif game == "Active Hold / Pong":
+            self.objective_game = {
+                "kind": "hold",
+                "position": [0.5, 0.5],
+                "target": [0.45 + rng.random() * 0.1, 0.45 + rng.random() * 0.1],
+                "progress": 0.0,
+                "elapsed": 0.0,
+                "drift": [rng.choice((-1, 1)), rng.choice((-1, 1))],
+            }
+        else:
+            self.objective_game = {"kind": "arrows", "sequence": arrows, "index": 0}
+        self.set_options([])
+
+    def is_modal_game(self):
+        return self.state == "TERMINAL_GAME" and self.objective_game is not None
+
+    def _finish_objective_game(self):
+        if self._objective_callback_called:
+            return
+        self._objective_callback_called = True
+        message = self.on_objective_action(0) if self.on_objective_action else None
+        self.objective_game = None
+        self.return_to_playing()
+        if message:
+            self.set_transient(message, (80, 255, 80), duration_ms=1800)
+
+    def _cancel_objective_game(self):
+        self.objective_game = None
+        self.return_to_playing()
+        self.set_transient("Puzzle cancelled; terminal disconnected.", (255, 180, 80), duration_ms=1400)
+
+    def _objective_key(self, key):
+        game = self.objective_game
+        if not game or key not in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT):
+            return
+        kind = game["kind"]
+        if kind == "arrows":
+            if key == game["sequence"][game["index"]]:
+                game["index"] += 1
+                if game["index"] >= len(game["sequence"]):
+                    self._finish_objective_game()
+            else:
+                game["index"] = 0
+                self.set_transient("Sequence mismatch — start again.", (255, 100, 100), duration_ms=900)
+        elif kind == "sine":
+            if key == pygame.K_LEFT:
+                game["selected"] = (game["selected"] - 1) % 3
+            elif key == pygame.K_RIGHT:
+                game["selected"] = (game["selected"] + 1) % 3
+            elif key == pygame.K_UP:
+                game["values"][game["selected"]] = min(10, game["values"][game["selected"]] + 1)
+            elif key == pygame.K_DOWN:
+                game["values"][game["selected"]] = max(0, game["values"][game["selected"]] - 1)
+            if game["values"] == game["targets"]:
+                self._finish_objective_game()
+        elif kind == "grid":
+            dx, dy = {
+                pygame.K_UP: (0, -1),
+                pygame.K_DOWN: (0, 1),
+                pygame.K_LEFT: (-1, 0),
+                pygame.K_RIGHT: (1, 0),
+            }[key]
+            nx, ny = game["cursor"][0] + dx, game["cursor"][1] + dy
+            if not (0 <= nx < game["width"] and 0 <= ny < game["height"]):
+                self.set_transient("That conduit is outside the grid.", (255, 180, 80), duration_ms=700)
+            elif (nx, ny) in game["visited"]:
+                self.set_transient("Flow cannot revisit a covered tile.", (255, 100, 100), duration_ms=900)
+            else:
+                game["cursor"] = [nx, ny]
+                game["visited"].add((nx, ny))
+                if len(game["visited"]) == game["total"]:
+                    self._finish_objective_game()
+        elif kind == "numbers":
+            if key == pygame.K_LEFT:
+                game["selected"] = (game["selected"] - 1) % 3
+            elif key == pygame.K_RIGHT:
+                game["selected"] = (game["selected"] + 1) % 3
+            elif key == pygame.K_UP:
+                game["values"][game["selected"]] = min(9, game["values"][game["selected"]] + 1)
+            elif key == pygame.K_DOWN:
+                game["values"][game["selected"]] = max(0, game["values"][game["selected"]] - 1)
+            if game["values"] == game["targets"]:
+                self._finish_objective_game()
+        elif kind == "simon" and game["phase"] == "input":
+            if key == game["sequence"][game["index"]]:
+                game["index"] += 1
+                if game["index"] >= len(game["sequence"]):
+                    self._finish_objective_game()
+            else:
+                game["index"] = 0
+                self.set_transient("Memory lost — repeat from the first tone.", (255, 100, 100), duration_ms=900)
+        elif kind == "hold":
+            push = {
+                pygame.K_UP: (0, -0.13),
+                pygame.K_DOWN: (0, 0.13),
+                pygame.K_LEFT: (-0.13, 0),
+                pygame.K_RIGHT: (0.13, 0),
+            }[key]
+            game["position"][0] = max(0.0, min(1.0, game["position"][0] + push[0]))
+            game["position"][1] = max(0.0, min(1.0, game["position"][1] + push[1]))
+
+    def update_objective_game(self, dt_ms):
+        """Advance timed modal games and the non-modal roaming tracker."""
+        if self.is_modal_game():
+            game = self.objective_game
+            if game["kind"] == "simon" and game["phase"] == "show":
+                if pygame.time.get_ticks() >= game["show_until"]:
+                    game["show_index"] += 1
+                    if game["show_index"] >= len(game["sequence"]):
+                        game["phase"] = "input"
+                    else:
+                        game["show_until"] = pygame.time.get_ticks() + 650
+            elif game["kind"] == "hold":
+                game["elapsed"] += dt_ms
+                t = game["elapsed"] / 1000.0
+                game["position"][0] = max(0.0, min(1.0, game["position"][0] + math.sin(t * 2.3) * dt_ms * 0.00004 * game["drift"][0]))
+                game["position"][1] = max(0.0, min(1.0, game["position"][1] + math.cos(t * 1.9) * dt_ms * 0.00004 * game["drift"][1]))
+                inside = all(abs(game["position"][i] - game["target"][i]) < 0.16 for i in (0, 1))
+                game["progress"] = max(0.0, game["progress"] + (dt_ms if inside else -dt_ms * 1.5))
+                if game["progress"] >= 7000:
+                    self._finish_objective_game()
+        elif self.signal_tracker:
+            target = self.signal_tracker["target"]
+            self.signal_tracker["last_distance"] = self._tracker_distance(self.signal_tracker["player"], target)
+
+    @staticmethod
+    def _tracker_distance(a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def start_signal_tracker(self, objective, target, player_pos):
+        self.objective = objective
+        self._objective_callback_called = False
+        self.signal_tracker = {"target": tuple(target), "player": tuple(player_pos), "last_distance": 999999}
+        self.set_transient("HOTSPOT TRACKER ONLINE — follow hot/cold readings.", (80, 220, 255), duration_ms=1800)
+
+    def update_signal_tracker(self, player_pos):
+        if not self.signal_tracker:
+            return
+        self.signal_tracker["player"] = tuple(player_pos)
+        distance = self._tracker_distance(player_pos, self.signal_tracker["target"])
+        self.signal_tracker["last_distance"] = distance
+        if distance == 0:
+            self.signal_tracker = None
+            self._objective_callback_called = False
+            self._finish_objective_game()
+
+    def cancel_signal_tracker(self):
+        if self.signal_tracker:
+            self.signal_tracker = None
+            self.set_transient("Hotspot tracker disconnected.", (255, 180, 80), duration_ms=1200)
 
     def open_notepad(self):
         if self.network_mode:
@@ -369,6 +568,21 @@ class TerminalUI:
     def handle_input(self, event):
         # 1. Passive states main.py will transition us out of — nothing to do
         if self.state in ("CONNECTING", "JOINING"):
+            return
+
+        # Modal objective games own all arrow keys.  The map movement loop must
+        # never see these events while a terminal is connected.
+        if self.is_modal_game():
+            if event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                    self._cancel_objective_game()
+                else:
+                    self._objective_key(event.key)
+            return
+
+        if self.signal_tracker and event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                self.cancel_signal_tracker()
             return
 
         # 2. Text input phases
@@ -801,6 +1015,31 @@ class TerminalUI:
             surface.blit(obj_lbl, (rect.x + 20, y))
             y += line_height
 
+        if self.signal_tracker and self.state == "PLAYING":
+            distance = self.signal_tracker.get("last_distance", 0)
+            direction_x = self.signal_tracker["target"][0] - self.signal_tracker["player"][0]
+            direction_y = self.signal_tracker["target"][1] - self.signal_tracker["player"][1]
+            if distance <= 2:
+                heat = "SCALDING"
+                color = (255, 100, 80)
+            elif distance <= 5:
+                heat = "HOT"
+                color = (255, 190, 80)
+            elif distance <= 10:
+                heat = "WARM"
+                color = (255, 220, 120)
+            else:
+                heat = "COLD"
+                color = (100, 180, 255)
+            horizontal = "east" if direction_x > 0 else "west" if direction_x < 0 else ""
+            vertical = "south" if direction_y > 0 else "north" if direction_y < 0 else ""
+            toward = " and ".join(part for part in (vertical, horizontal) if part) or "here"
+            tracker_lbl = self.bold_font.render(
+                f"HOTSPOT: {heat} — move {toward} ({distance} sectors)", True, color
+            )
+            surface.blit(tracker_lbl, (rect.x + 20, y))
+            y += line_height
+
         if self.network_mode and self.state == "PLAYING" and other_players:
             y += 5
             for cid, p in other_players.items():
@@ -933,18 +1172,7 @@ class TerminalUI:
             y += 10
 
         elif self.state == "TERMINAL_GAME":
-            prompt = self.bold_font.render(
-                objective.get("terminal_prompt", "TERMINAL LINK") if objective else "TERMINAL LINK",
-                True,
-                (80, 220, 255),
-            )
-            surface.blit(prompt, (rect.x + 20, y))
-            y += line_height
-            hint = self.font.render(
-                "[Enter] Execute   [Esc] Disconnect", True, TEXT_DIM
-            )
-            surface.blit(hint, (rect.x + 20, y))
-            y += line_height
+            self._render_objective_game(surface, rect, y, line_height)
 
         elif self.state == "NOTEPAD":
             entries = (self.active_character or {}).get("notepad", [])
@@ -1094,6 +1322,82 @@ class TerminalUI:
     def enter_playing_state(self, message):
         self.return_to_playing()
         self.set_transient(message, (80, 255, 80))
+
+    def _render_objective_game(self, surface, rect, y, line_height):
+        game = self.objective_game or {}
+        kind = game.get("kind")
+        title = (self.objective or {}).get("game", "OBJECTIVE PUZZLE")
+        surface.blit(self.bold_font.render(title.upper(), True, (80, 220, 255)), (rect.x + 20, y))
+        y += line_height + 8
+        arrow_names = {
+            pygame.K_UP: "↑",
+            pygame.K_DOWN: "↓",
+            pygame.K_LEFT: "←",
+            pygame.K_RIGHT: "→",
+        }
+        if kind == "arrows":
+            sequence = " ".join(arrow_names[key] for key in game["sequence"])
+            entered = " ".join(arrow_names[key] for key in game["sequence"][:game["index"]])
+            surface.blit(self.font.render("Match this sequence:", True, TEXT_WHITE), (rect.x + 20, y))
+            y += line_height
+            surface.blit(self.bold_font.render(sequence, True, (255, 220, 100)), (rect.x + 35, y))
+            y += line_height
+            surface.blit(self.font.render(f"Input: {entered or '(none)'}", True, (120, 255, 160)), (rect.x + 35, y))
+        elif kind == "sine":
+            labels = ("Amplitude", "Wavelength", "Frequency")
+            surface.blit(self.font.render("Tune every control to its target.", True, TEXT_WHITE), (rect.x + 20, y))
+            y += line_height
+            for i, label in enumerate(labels):
+                color = (255, 220, 100) if i == game["selected"] else TEXT_WHITE
+                surface.blit(self.font.render(f"{'>' if i == game['selected'] else ' '} {label:<11} {game['values'][i]:2d} / {game['targets'][i]:2d}", True, color), (rect.x + 30, y))
+                y += line_height
+        elif kind == "grid":
+            surface.blit(self.font.render("Route the flow through every tile exactly once.", True, TEXT_WHITE), (rect.x + 20, y))
+            y += line_height
+            for gy in range(game["height"]):
+                row = []
+                for gx in range(game["width"]):
+                    pos = (gx, gy)
+                    if pos == tuple(game["cursor"]):
+                        cell = "[@]"
+                    elif pos in game["visited"]:
+                        cell = "[·]"
+                    else:
+                        cell = "[ ]"
+                    row.append(cell)
+                surface.blit(self.bold_font.render(" ".join(row), True, (120, 255, 160)), (rect.x + 35, y))
+                y += line_height
+            surface.blit(self.font.render(f"Covered {len(game['visited'])}/{game['total']} tiles", True, TEXT_DIM), (rect.x + 35, y))
+        elif kind == "numbers":
+            surface.blit(self.font.render("Select a column, then calibrate its value.", True, TEXT_WHITE), (rect.x + 20, y))
+            y += line_height
+            for i, (value, target) in enumerate(zip(game["values"], game["targets"])):
+                color = (255, 220, 100) if i == game["selected"] else TEXT_WHITE
+                surface.blit(self.font.render(f"{'>' if i == game['selected'] else ' '} Dial {i + 1}: {value} / {target}", True, color), (rect.x + 35, y))
+                y += line_height
+        elif kind == "simon":
+            if game["phase"] == "show":
+                shown = arrow_names[game["sequence"][game["show_index"]]]
+                surface.blit(self.bold_font.render(f"MEMORIZE: {shown}", True, (255, 220, 100)), (rect.x + 30, y))
+            else:
+                surface.blit(self.font.render("Repeat the pattern with the arrow keys.", True, TEXT_WHITE), (rect.x + 20, y))
+                y += line_height
+                surface.blit(self.font.render(f"Input: {game['index']}/{len(game['sequence'])}", True, TEXT_DIM), (rect.x + 35, y))
+        elif kind == "hold":
+            surface.blit(self.font.render("Tap arrows to hold the signal inside the target.", True, TEXT_WHITE), (rect.x + 20, y))
+            y += line_height
+            box = pygame.Rect(rect.x + 35, y, 280, 150)
+            pygame.draw.rect(surface, (25, 25, 35), box)
+            target_x = box.x + int(game["target"][0] * box.width)
+            target_y = box.y + int(game["target"][1] * box.height)
+            pygame.draw.circle(surface, (80, 220, 120), (target_x, target_y), 24, 2)
+            dot_x = box.x + int(game["position"][0] * box.width)
+            dot_y = box.y + int(game["position"][1] * box.height)
+            pygame.draw.circle(surface, (255, 220, 100), (dot_x, dot_y), 8)
+            y += box.height + 8
+            surface.blit(self.font.render(f"Hold progress: {min(100, int(game['progress'] / 70))}%", True, TEXT_WHITE), (rect.x + 35, y))
+        y += line_height + 8
+        surface.blit(self.font.render("[Arrow keys] Play    [Esc/Q] Disconnect", True, TEXT_DIM), (rect.x + 20, y))
 
     def render_minimap(
         self,

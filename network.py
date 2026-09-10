@@ -84,6 +84,7 @@ class GameServer:
         self._sock = None
         self._running = False
         self.pending_interacts = []
+        self.pending_objective_completions = []
         self.doors_snapshot = {}
         self.pending_pickups = []
         self.pending_drops = []  # [(client_id, index), ...]
@@ -160,6 +161,9 @@ class GameServer:
                             self.pending_interacts.append(
                                 (client_id, msg.get("x"), msg.get("y"))
                             )
+                    elif mtype == "objective_complete" and client_id:
+                        with self._lock:
+                            self.pending_objective_completions.append(client_id)
                     elif mtype == "pickup" and client_id:
                         with self._lock:
                             self.pending_pickups.append(
@@ -335,6 +339,12 @@ class GameServer:
             self.pending_interacts = []
             return items
 
+    def consume_pending_objective_completions(self):
+        with self._lock:
+            completions = self.pending_objective_completions
+            self.pending_objective_completions = []
+            return completions
+
     def set_doors_snapshot(self, doors):
         with self._lock:
             self.doors_snapshot = {f"{x},{y}": v for (x, y), v in doors.items()}
@@ -374,6 +384,18 @@ class GameServer:
             player = self.players.get(client_id)
             if player and player.get("socket"):
                 player["socket"].send({"type": "purchase_result", "message": message})
+
+    def send_objective_start(self, client_id, objective, target=None):
+        with self._lock:
+            player = self.players.get(client_id)
+            if player and player.get("socket"):
+                player["socket"].send(
+                    {
+                        "type": "objective_start",
+                        "objective": objective,
+                        "target": list(target) if target else None,
+                    }
+                )
 
     def add_item_to_player(self, client_id, item_id):
         with self._lock:
@@ -537,3 +559,6 @@ class GameClient:
 
     def send_deposit(self):
         self._stream.send({"type": "deposit"})
+
+    def send_objective_complete(self):
+        self._stream.send({"type": "objective_complete"})
