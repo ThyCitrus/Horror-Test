@@ -74,6 +74,7 @@ class GameServer:
         floor_number: int = 1,
         shared_bytes: int = 0,
         objective=None,
+        player_count: int = 1,
     ):
         self.seed = seed
         self.port = port
@@ -92,6 +93,7 @@ class GameServer:
         self.floor_number = floor_number
         self.shared_bytes = shared_bytes
         self.objective = objective
+        self.player_count = player_count
         self.events = []
 
     def start(self):
@@ -203,6 +205,7 @@ class GameServer:
                         "floor": self.floor_number,
                         "shared_bytes": self.shared_bytes,
                         "objective": self.objective,
+                        "player_count": self.player_count,
                     }
                 )
                 return
@@ -218,6 +221,7 @@ class GameServer:
                     "floor": self.floor_number,
                     "shared_bytes": self.shared_bytes,
                     "objective": self.objective,
+                    "player_count": self.player_count,
                 }
             )
 
@@ -382,7 +386,11 @@ class GameServer:
             self.items_snapshot = {f"{x},{y}": v for (x, y), v in items.items()}
 
     def set_world_state(
-        self, floor_number=None, shared_bytes=None, objective=_UNSET
+        self,
+        floor_number=None,
+        shared_bytes=None,
+        objective=_UNSET,
+        player_count=None,
     ):
         with self._lock:
             if floor_number is not None:
@@ -391,6 +399,8 @@ class GameServer:
                 self.shared_bytes = shared_bytes
             if objective is not _UNSET:
                 self.objective = objective
+            if player_count is not None:
+                self.player_count = max(1, int(player_count))
 
     def add_shared_bytes(self, amount):
         with self._lock:
@@ -423,6 +433,7 @@ class GameServer:
                     "floor": self.floor_number,
                     "shared_bytes": self.shared_bytes,
                     "objective": self.objective,
+                    "player_count": self.player_count,
                     "events": self.events[-10:],
                 }
                 dead_sockets = []

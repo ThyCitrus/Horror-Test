@@ -95,9 +95,10 @@ def build_shop_dungeon():
     return tiles, {}, items
 
 
-def build_floor_dungeon(floor_number, seed):
-    """Generate a playable floor and deterministic objective pickup layout."""
-    tiles = generate_dungeon(max_structures=60, seed=seed)
+def build_floor_dungeon(floor_number, seed, player_count=1):
+    """Generate a floor with 14 rooms per player plus the floor number."""
+    room_count = 14 * max(1, int(player_count)) + floor_number
+    tiles = generate_dungeon(max_structures=room_count, seed=seed)
     rng = random.Random(seed + floor_number * 7919)
     floors = [
         pos for pos, tile in tiles.items() if tile == FLOOR
