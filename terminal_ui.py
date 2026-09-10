@@ -3,7 +3,16 @@ import math
 import array
 import pygame
 
-from save_utils import list_slots, load_json, save_json, slot_path, delete_slot
+from save_utils import (
+    add_character_event,
+    add_notepad_entry,
+    list_slots,
+    load_json,
+    normalize_character,
+    save_json,
+    slot_path,
+    delete_slot,
+)
 
 TEXT_WHITE = (230, 230, 230)
 TEXT_DIM = (120, 120, 120)
@@ -43,6 +52,8 @@ class TerminalUI:
         on_mp_color_confirm=None,
         on_multiplayer_quit=None,
         on_drop_item=None,
+        on_shop_purchase=None,
+        on_objective_action=None,
     ):
         self.font = font
         self.bold_font = bold_font
@@ -90,6 +101,11 @@ class TerminalUI:
         self.inventory_index = 0
         self.current_inventory_items = []
         self.on_drop_item = on_drop_item
+        self.on_shop_purchase = on_shop_purchase
+        self.on_objective_action = on_objective_action
+        self.objective = None
+        self.floor_number = 0
+        self.shared_bytes = None
 
         self.load_start_menu()
 
@@ -198,13 +214,19 @@ class TerminalUI:
             "seed": current_seed,
             "player_x": current_pos[0],
             "player_y": current_pos[1],
+            "floor": 0 if current_seed == 0 else 1,
             "level": 1,
             "hp": 100,
             "max_hp": 100,
             "gold": 0,
+            "bytes": 100,
+            "shop_free_light_used": False,
             "items": [],
             "equipped_light": None,
             "light_on": False,
+            "notepad": [],
+            "events": [],
+            "objective": None,
         }
         save_json(character, slot_path(self.creation_slot))
         self.active_character = character
@@ -292,9 +314,47 @@ class TerminalUI:
 
     def enter_multiplayer_playing(self, name, color):
         self.network_mode = True
-        self.mp_hud_player = {"name": name, "color": color, "alive": True}
+        self.mp_hud_player = {
+            "name": name,
+            "color": color,
+            "alive": True,
+            "bytes": 0,
+        }
         self.return_to_playing()
         self.set_transient(f"Connected as {name}!", (80, 255, 80), duration_ms=2000)
+
+    def set_world_state(self, floor_number, objective=None, shared_bytes=None):
+        """Update the small, render-only slice of authoritative world state."""
+        self.floor_number = floor_number
+        self.objective = objective
+        self.shared_bytes = shared_bytes
+
+    def add_system_event(self, text, lore=None):
+        """Show a narrative event and optionally persist it on the active save."""
+        self.add_log(f"[SYSTEM] {text}", (130, 220, 255))
+        if self.active_character:
+            add_character_event(self.active_character, text)
+            if lore:
+                add_notepad_entry(self.active_character, lore)
+            save_json(
+                self.active_character,
+                slot_path(self.active_character["slot"]),
+            )
+
+    def open_objective_terminal(self, objective):
+        """Open the extensible terminal objective menu."""
+        self.objective = objective
+        self.state = "TERMINAL_GAME"
+        actions = objective.get("terminal_actions") or ["Run sequence", "Leave terminal"]
+        self.set_options(actions)
+
+    def open_notepad(self):
+        if self.network_mode:
+            self.set_transient("Notepad is available on local character saves.", (255, 180, 80))
+            return
+        normalize_character(self.active_character or {})
+        self.state = "NOTEPAD"
+        self.set_options(["Back"])
 
     # --- input handling ---
 
@@ -444,10 +504,30 @@ class TerminalUI:
                     self.return_to_playing()
             return
 
+        if self.state == "TERMINAL_GAME":
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self.return_to_playing()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN:
+                self.execute_selection()
+            elif event.type == pygame.KEYDOWN and self.options:
+                if event.key == pygame.K_UP:
+                    self.selected_index = (self.selected_index - 1) % len(self.options)
+                elif event.key == pygame.K_DOWN:
+                    self.selected_index = (self.selected_index + 1) % len(self.options)
+            return
+
+        if self.state == "NOTEPAD":
+            if event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_ESCAPE):
+                self.return_to_playing()
+            return
+
         # 4. General key navigation
         if event.type == pygame.KEYDOWN:
+            if self.state == "PLAYING" and event.key == pygame.K_n:
+                self.open_notepad()
+                return
             if (
-                self.state in ("PLAYING", "INVENTORY", "MAP")
+                self.state in ("PLAYING", "INVENTORY", "MAP", "NOTEPAD", "TERMINAL_GAME")
                 and event.key == pygame.K_ESCAPE
             ):
                 if self.network_mode:
@@ -542,7 +622,8 @@ class TerminalUI:
                 chosen = slots[sel]
                 self.creation_slot = chosen["slot"]
                 if chosen["filled"]:
-                    self.active_character = load_json(chosen["path"])
+                    self.active_character = normalize_character(load_json(chosen["path"]))
+                    save_json(self.active_character, chosen["path"])
                     self.enter_playing_state(f"Loaded {self.active_character['name']}!")
                 else:
                     self.creation_name = ""
@@ -571,8 +652,33 @@ class TerminalUI:
                 self.inventory_index = 0
                 self.set_options(["Back"])
             elif sel == 1:
-                self.state = "MAP"
-                self.set_options(["Back"])
+                items = self.active_character.get("items", []) if self.active_character else []
+                if "Map" in items:
+                    self.state = "MAP"
+                    self.set_options(["Back"])
+                else:
+                    self.set_transient("Map not installed.", (255, 180, 80), duration_ms=1500)
+
+        elif self.state == "SHOP":
+            if sel == len(self.options) - 1:
+                self.return_to_playing()
+            elif self.on_shop_purchase:
+                item_ids = ["Flashlight", "Lantern", "Map"]
+                message = self.on_shop_purchase(item_ids[sel])
+                color = (80, 255, 80) if "Purchased" in message else (255, 180, 80)
+                self.set_transient(message, color, duration_ms=1800)
+                self.open_shop(self.active_character)
+
+        elif self.state == "TERMINAL_GAME":
+            if sel == len(self.options) - 1:
+                self.return_to_playing()
+            elif self.on_objective_action:
+                message = self.on_objective_action(sel)
+                if message:
+                    self.set_transient(message, (80, 255, 80), duration_ms=1800)
+
+        elif self.state == "NOTEPAD":
+            self.return_to_playing()
 
         elif self.state == "INVENTORY":
             self.return_to_playing()
@@ -602,6 +708,9 @@ class TerminalUI:
         other_players=None,
         local_items=None,
         interact_prompt=None,
+        objective=None,
+        floor_number=None,
+        shared_bytes=None,
     ):
         pygame.draw.rect(surface, PANEL_BG, rect)
         pygame.draw.line(surface, PANEL_DIVIDER, (rect.x, 0), (rect.x, rect.height), 2)
@@ -627,6 +736,45 @@ class TerminalUI:
         if interact_prompt and self.state in ("PLAYING", "INVENTORY", "MAP"):
             prompt_lbl = self.font.render(interact_prompt, True, (255, 220, 120))
             surface.blit(prompt_lbl, (rect.x + 20, y))
+            y += line_height
+
+        if floor_number is not None and self.state in (
+            "PLAYING",
+            "INVENTORY",
+            "MAP",
+            "TERMINAL_GAME",
+            "NOTEPAD",
+        ):
+            floor_lbl = self.bold_font.render(
+                f"FACILITY FLOOR {floor_number}", True, (180, 220, 255)
+            )
+            surface.blit(floor_lbl, (rect.x + 20, y))
+            y += line_height
+            if shared_bytes is not None:
+                bytes_lbl = self.font.render(
+                    f"Shared bytes: {shared_bytes}", True, (255, 220, 100)
+                )
+                surface.blit(bytes_lbl, (rect.x + 20, y))
+                y += line_height
+
+        if objective and self.state in (
+            "PLAYING",
+            "INVENTORY",
+            "MAP",
+            "TERMINAL_GAME",
+            "NOTEPAD",
+        ):
+            objective_text = objective.get("title", "Unknown objective")
+            progress = objective.get("progress", 0)
+            required = objective.get("required", 1)
+            if objective.get("completed"):
+                objective_text = "COMPLETE: " + objective_text
+            obj_lbl = self.font.render(
+                f"Objective: {objective_text} [{progress}/{required}]",
+                True,
+                (120, 255, 160) if objective.get("completed") else (255, 220, 120),
+            )
+            surface.blit(obj_lbl, (rect.x + 20, y))
             y += line_height
 
         if self.network_mode and self.state == "PLAYING" and other_players:
@@ -742,6 +890,33 @@ class TerminalUI:
                 surface.blit(hint_lbl, (rect.x + 20, y))
             y += 10
 
+        elif self.state == "TERMINAL_GAME":
+            prompt = self.bold_font.render(
+                objective.get("terminal_prompt", "TERMINAL LINK") if objective else "TERMINAL LINK",
+                True,
+                (80, 220, 255),
+            )
+            surface.blit(prompt, (rect.x + 20, y))
+            y += line_height
+            hint = self.font.render(
+                "[Enter] Execute   [Esc] Disconnect", True, TEXT_DIM
+            )
+            surface.blit(hint, (rect.x + 20, y))
+            y += line_height
+
+        elif self.state == "NOTEPAD":
+            entries = (self.active_character or {}).get("notepad", [])
+            if not entries:
+                entries = ["No lore recovered."]
+            for entry in entries[-12:]:
+                lbl = self.font.render(f"- {entry}", True, TEXT_WHITE)
+                surface.blit(lbl, (rect.x + 20, y))
+                y += line_height
+            y += 5
+            hint = self.font.render("[Enter/Esc] Back", True, TEXT_DIM)
+            surface.blit(hint, (rect.x + 20, y))
+            y += line_height
+
         elif self.state == "MAP" and dungeon is not None and discovered is not None:
             hud_color = (80, 200, 255)
             if self.active_character:
@@ -763,6 +938,8 @@ class TerminalUI:
             "CONNECTING",
             "JOINING",
             "INVENTORY",
+            "TERMINAL_GAME",
+            "NOTEPAD",
         ):
             for i, opt in enumerate(self.options):
                 color = self.option_colors[i]
@@ -804,6 +981,10 @@ class TerminalUI:
             r, g, b = map(int, p["color"].split())
             name_lbl = self.bold_font.render(p["name"], True, (r, g, b))
             surface.blit(name_lbl, (rect.x + 20, hud_y))
+            bytes_lbl = self.font.render(
+                f"Shared bytes: {self.shared_bytes or 0}", True, (255, 220, 100)
+            )
+            surface.blit(bytes_lbl, (rect.x + 20, hud_y + line_height))
 
     def render_hud_line(self, surface, x, y, character):
         health_percent = character["hp"] / character["max_hp"]
@@ -819,11 +1000,12 @@ class TerminalUI:
 
         segments = [(f"HP: {character['hp']}/{character['max_hp']}", h_color)]
 
-        drain = character["gold"] // 10
+        currency = character.get("bytes", character.get("gold", 0))
+        drain = currency // 10
         g_r = 255
         g_g = max(150, 255 - max(0, drain - 255))
         g_b = max(0, 255 - drain)
-        segments.append((f"Gold: {character['gold']}", (g_r, g_g, g_b)))
+        segments.append((f"Bytes: {currency}", (g_r, g_g, g_b)))
 
         segments.append((f"Lv. {character['level']}", (0, 255, 255)))
 
@@ -843,6 +1025,23 @@ class TerminalUI:
     def return_to_playing(self):
         self.state = "PLAYING"
         self.set_options(["Inventory", "Map"])
+
+    def open_shop(self, character=None, shared_bytes=None):
+        self.state = "SHOP"
+        free_light = character is not None and not character.get(
+            "shop_free_light_used", False
+        )
+        light_price = "FREE (first light)" if free_light else "100 bytes"
+        if shared_bytes is not None:
+            light_price = "100 bytes (shared)"
+        self.set_options(
+            [
+                f"Flashlight — {light_price}",
+                f"Lantern — {light_price}",
+                "Map — 100 bytes",
+                "Leave terminal",
+            ]
+        )
 
     def set_hosting_info(self, info):
         self.hosting_info = info
