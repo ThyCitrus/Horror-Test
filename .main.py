@@ -173,9 +173,11 @@ def main():
             "fast": ["Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"][
                 (number - 1) % 3
             ],
-            "long": ["Grid Fill/Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"][
-                (number - 1) % 3
-            ],
+            "long": [
+                "Grid Fill/Flow Puzzle",
+                "Memory Pattern / Simon",
+                "Active Hold / Pong",
+            ][(number - 1) % 3],
             "roaming": "Hotspot Signal Tracker",
         }[objective_type]
         if objective_type == "long":
@@ -888,7 +890,9 @@ def main():
                                 if candidates:
                                     target = max(
                                         candidates,
-                                        key=lambda candidate: abs(candidate[0] - player_x)
+                                        key=lambda candidate: abs(
+                                            candidate[0] - player_x
+                                        )
                                         + abs(candidate[1] - player_y),
                                     )
                                     active_objective_pos = pos
@@ -1007,12 +1011,9 @@ def main():
             start_host()
 
         # --- movement input ---
-        can_move = (
-            not terminal.is_modal_game()
-            and (
-                (terminal.active_character and not terminal.network_mode)
-                or (terminal.network_mode and local_client_id in players)
-            )
+        can_move = not terminal.is_modal_game() and (
+            (terminal.active_character and not terminal.network_mode)
+            or (terminal.network_mode and local_client_id in players)
         )
         if can_move and terminal.state == "PLAYING" and time_since_last_move >= 150:
             keys = pygame.key.get_pressed()
@@ -1107,7 +1108,9 @@ def main():
                             if candidates:
                                 target = max(
                                     candidates,
-                                    key=lambda candidate: abs(candidate[0] - player_pos[0])
+                                    key=lambda candidate: abs(
+                                        candidate[0] - player_pos[0]
+                                    )
                                     + abs(candidate[1] - player_pos[1]),
                                 )
                         active_network_objectives[cid] = (ix, iy)
