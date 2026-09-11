@@ -128,58 +128,14 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
         return tiles, {}, {}
     ladder_positions = [pos for pos, tile in tiles.items() if tile == LADDER]
     occupied = set(ladder_positions)
-    wall_mounts = [
-        pos for pos in floors
-        if any(
-            tiles.get((pos[0] + dx, pos[1] + dy)) == WALL
-            for dx, dy in DIRECTIONS.values()
-        )
-        and not any(
-            tiles.get((pos[0] + dx, pos[1] + dy)) == DOOR
-            for dx, dy in DIRECTIONS.values()
-        )
-    ]
-    wall_mounts = [pos for pos in wall_mounts if pos not in occupied]
-    safe_floors = [
-        pos
-        for pos in floors
-        if pos not in occupied
-        and not any(
-            tiles.get((pos[0] + dx, pos[1] + dy)) == DOOR
-            for dx, dy in DIRECTIONS.values()
-        )
-    ]
     shop_floors_visited = max(0, (floor_number - 1) // 3)
     items = {}
-    objective_count = max(1, math.ceil((14 * max(1, int(player_count)) + floor_number) / 10))
-    objective_candidates = wall_mounts or safe_floors
-    objective_positions = rng.sample(
-        objective_candidates,
-        min(objective_count, len(objective_candidates)),
-    )
-    roaming_count = min(shop_floors_visited, len(objective_positions))
-    for index, objective_pos in enumerate(objective_positions):
-        if index < roaming_count:
-            objective_type = "roaming"
-            item_id = ROAMING_SIGNAL
-        else:
-            objective_type = "fast" if rng.random() < 0.75 else "long"
-            item_id = OBJECTIVE_TERMINAL
-        items[objective_pos] = {
-            "item_id": item_id,
-            "objective_type": objective_type,
-        }
-    objective_type = (
-        items[objective_positions[0]]["objective_type"]
-        if objective_positions
-        else "fast"
-    )
     scrap_pool = [
         pos for pos in floors
         if pos not in occupied and pos not in items
     ]
     rng.shuffle(scrap_pool)
-    scrap_count = max(3 if objective_type == "long" else 2, min(5, 2 + floor_number // 2))
+    scrap_count = min(5, 2 + floor_number // 2)
     for pos in scrap_pool[:scrap_count]:
         tier_index = min(
             len(LOOT_TABLE) - 1,
