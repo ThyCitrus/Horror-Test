@@ -370,6 +370,24 @@ def main():
                     slot_path(terminal.active_character["slot"]),
                 )
 
+    def drop_loot(index):
+        if terminal.network_mode:
+            return
+        if terminal.active_character:
+            loot = terminal.active_character.get("loot", [])
+            if 0 <= index < len(loot):
+                entry = loot.pop(index)
+                drop_pos = find_drop_position(dungeon, items, player_x, player_y)
+                items[drop_pos] = {
+                    "item_id": DATA_SCRAP,
+                    "name": entry.get("name", "Recovered data"),
+                    "value": entry.get("value", 0),
+                }
+                save_json(
+                    terminal.active_character,
+                    slot_path(terminal.active_character["slot"]),
+                )
+
     def teardown_multiplayer():
         nonlocal net_server, net_client, local_client_id, players, doors, items
         if net_client:
@@ -532,6 +550,7 @@ def main():
         on_mp_color_confirm=confirm_mp_color,
         on_multiplayer_quit=teardown_multiplayer,
         on_drop_item=drop_item,
+        on_drop_loot=drop_loot,
         on_shop_purchase=purchase_shop_item,
         on_objective_action=complete_objective,
         on_equip_item=equip_item,

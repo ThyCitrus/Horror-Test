@@ -53,6 +53,7 @@ class TerminalUI:
         on_mp_color_confirm=None,
         on_multiplayer_quit=None,
         on_drop_item=None,
+        on_drop_loot=None,
         on_shop_purchase=None,
         on_objective_action=None,
         on_equip_item=None,
@@ -72,9 +73,9 @@ class TerminalUI:
 
         self.logs = [
             "-----------------------------------------",
-            "             Dungeon Crawler",
+            "             THE ARCHIVE",
             "-----------------------------------------",
-            "Press Enter/Arrow keys to navigate...",
+            "SYSTEM TERMINAL // READY",
         ]
         self.options = []
         self.option_colors = []
@@ -102,8 +103,11 @@ class TerminalUI:
         self.mp_hud_player = None  # {"name", "color", "alive"} for guests only
         self.hosting_info = None
         self.inventory_index = 0
+        self.inventory_section = None
+        self.current_inventory_loot = []
         self.current_inventory_items = []
         self.on_drop_item = on_drop_item
+        self.on_drop_loot = on_drop_loot
         self.on_shop_purchase = on_shop_purchase
         self.on_objective_action = on_objective_action
         self.on_equip_item = on_equip_item
@@ -712,17 +716,45 @@ class TerminalUI:
 
         if self.state == "INVENTORY":
             if event.type == pygame.KEYDOWN:
-                count = len(self.current_inventory_items or [])
+                if event.key == pygame.K_LEFT:
+                    if self.inventory_section is None:
+                        self.return_to_playing()
+                    else:
+                        self.inventory_section = None
+                        self.inventory_index = 0
+                    return
+                if self.inventory_section is None:
+                    if event.key == pygame.K_UP:
+                        self.inventory_index = (self.inventory_index - 1) % 3
+                    elif event.key == pygame.K_DOWN:
+                        self.inventory_index = (self.inventory_index + 1) % 3
+                    elif event.key == pygame.K_RIGHT:
+                        self.inventory_section = ("Tools", "Scrap", "Data")[
+                            self.inventory_index
+                        ]
+                        self.inventory_index = 0
+                    return
+                source = (
+                    self.current_inventory_items
+                    if self.inventory_section == "Tools"
+                    else self.current_inventory_loot
+                )
+                count = len(source or [])
                 if count > 0:
                     if event.key == pygame.K_UP:
                         self.inventory_index = (self.inventory_index - 1) % count
                     elif event.key == pygame.K_DOWN:
                         self.inventory_index = (self.inventory_index + 1) % count
-                    elif event.key == pygame.K_BACKSPACE:
-                        if self.on_drop_item:
-                            self.on_drop_item(self.inventory_index)
+                    elif event.key == pygame.K_RIGHT:
+                        self.inventory_section = None
                         self.inventory_index = 0
-                    elif event.key == pygame.K_RETURN:
+                    elif event.key == pygame.K_BACKSPACE:
+                        if self.inventory_section == "Tools" and self.on_drop_item:
+                            self.on_drop_item(self.inventory_index)
+                        elif self.inventory_section == "Scrap" and self.on_drop_loot:
+                            self.on_drop_loot(self.inventory_index)
+                        self.inventory_index = 0
+                    elif event.key == pygame.K_RETURN and self.inventory_section == "Tools":
                         item_id = (self.current_inventory_items or [])[self.inventory_index]
                         if self.on_equip_item:
                             self.set_transient(
@@ -730,8 +762,6 @@ class TerminalUI:
                                 (80, 255, 80),
                                 duration_ms=1400,
                             )
-                if event.key == pygame.K_RETURN and count == 0:
-                    self.return_to_playing()
             return
 
         if self.state == "TERMINAL_GAME":
@@ -746,8 +776,20 @@ class TerminalUI:
                     self.selected_index = (self.selected_index + 1) % len(self.options)
             return
 
+        if self.state == "SHOP":
+            if event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_RIGHT, pygame.K_RETURN):
+                    self.execute_selection()
+                elif event.key == pygame.K_LEFT:
+                    self.return_to_playing()
+                elif event.key == pygame.K_UP and self.options:
+                    self.selected_index = (self.selected_index - 1) % len(self.options)
+                elif event.key == pygame.K_DOWN and self.options:
+                    self.selected_index = (self.selected_index + 1) % len(self.options)
+            return
+
         if self.state == "NOTEPAD":
-            if event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_ESCAPE):
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_LEFT:
                 self.return_to_playing()
             return
 
@@ -791,8 +833,11 @@ class TerminalUI:
                 self.selected_index = (self.selected_index + 1) % len(self.options)
                 self._play_hover_sound()
                 self.notify_hover()
-            elif event.key == pygame.K_RETURN and self.options:
+            elif event.key == pygame.K_RIGHT and self.options:
                 self.execute_selection()
+            elif event.key == pygame.K_LEFT:
+                if self.state in ("MAP", "NOTEPAD", "SHOP"):
+                    self.return_to_playing()
 
         elif ENABLE_MOUSE_NAVIGATION and event.type == pygame.MOUSEMOTION:
             mx, my = event.pos
@@ -880,12 +925,13 @@ class TerminalUI:
             if sel == 0:
                 self.state = "INVENTORY"
                 self.inventory_index = 0
-                self.set_options(["Back"])
+                self.inventory_section = None
+                self.set_options(["Tools", "Scrap", "Data"])
             elif sel == 1:
                 items = self.active_character.get("items", []) if self.active_character else []
                 if "Map" in items:
                     self.state = "MAP"
-                    self.set_options(["Back"])
+                    self.set_options([])
                 else:
                     self.set_transient("Map not installed.", (255, 180, 80), duration_ms=1500)
 
@@ -1125,50 +1171,45 @@ class TerminalUI:
             y += line_height + 5
 
         elif self.state == "INVENTORY":
-            items_list = (
-                local_items
-                if local_items is not None
-                else (self.active_character["items"] if self.active_character else [])
+            surface.blit(
+                self.bold_font.render("> Inventory", True, (120, 255, 160)),
+                (rect.x + 20, y),
             )
-            self.current_inventory_items = items_list
-            if not items_list:
-                empty_lbl = self.font.render("(Empty)", True, TEXT_DIM)
-                surface.blit(empty_lbl, (rect.x + 20, y))
-                y += line_height
+            y += line_height
+            items_list = local_items if local_items is not None else (
+                self.active_character["items"] if self.active_character else []
+            )
+            self.current_inventory_items = list(items_list)
+            self.current_inventory_loot = list(local_loot or [])
+            if self.inventory_section is None:
+                entries = ["Tools", "Scrap", "Data"]
             else:
-                for i, item_name in enumerate(items_list):
-                    prefix = " > " if i == self.inventory_index else "   "
-                    active_font = (
-                        self.bold_font if i == self.inventory_index else self.font
-                    )
-                    item_lbl = active_font.render(
-                        f"{prefix}{item_name}", True, TEXT_WHITE
-                    )
-                    surface.blit(item_lbl, (rect.x + 20, y))
-                    y += line_height
-                y += 5
-                hint_lbl = self.font.render(
-                    "[Up/Down] Select   [Enter] Equip   [Backspace] Drop", True, TEXT_DIM
-                )
-                surface.blit(hint_lbl, (rect.x + 20, y))
-            loot = local_loot or []
-            if loot:
-                y += line_height
+                if self.inventory_section == "Tools":
+                    entries = self.current_inventory_items
+                elif self.inventory_section == "Scrap":
+                    entries = [
+                        f"{entry.get('name', 'Data')} — {entry.get('value', 0)} bytes"
+                        for entry in self.current_inventory_loot
+                    ]
+                else:
+                    entries = list((self.active_character or {}).get("notepad", []))
+                if not entries:
+                    entries = ["(Empty)"]
+            for i, item_name in enumerate(entries):
+                prefix = " > " if i == self.inventory_index else "   "
+                active_font = self.bold_font if i == self.inventory_index else self.font
                 surface.blit(
-                    self.bold_font.render("Floor loot (deposit at shop):", True, (255, 220, 120)),
+                    active_font.render(f"{prefix}{item_name}", True, TEXT_WHITE),
                     (rect.x + 20, y),
                 )
                 y += line_height
-                for entry in loot[-8:]:
-                    surface.blit(
-                        self.font.render(
-                            f"  {entry.get('name', 'Data')} — {entry.get('value', 0)} bytes",
-                            True,
-                            TEXT_WHITE,
-                        ),
-                        (rect.x + 20, y),
-                    )
-                    y += line_height
+            y += 5
+            hint = "[Up/Down] Select   [Left] Back"
+            if self.inventory_section == "Tools":
+                hint += "   [Enter] Equip   [Backspace] Drop"
+            elif self.inventory_section == "Scrap":
+                hint += "   [Backspace] Drop"
+            surface.blit(self.font.render(hint, True, TEXT_DIM), (rect.x + 20, y))
             y += 10
 
         elif self.state == "TERMINAL_GAME":
@@ -1183,11 +1224,16 @@ class TerminalUI:
                 surface.blit(lbl, (rect.x + 20, y))
                 y += line_height
             y += 5
-            hint = self.font.render("[Enter/Esc] Back", True, TEXT_DIM)
+            hint = self.font.render("[Left] Back", True, TEXT_DIM)
             surface.blit(hint, (rect.x + 20, y))
             y += line_height
 
         elif self.state == "MAP" and dungeon is not None and discovered is not None:
+            surface.blit(
+                self.bold_font.render("> Map", True, (120, 255, 160)),
+                (rect.x + 20, y),
+            )
+            y += line_height
             hud_color = (80, 200, 255)
             if self.active_character:
                 hud_color = tuple(map(int, self.active_character["color"].split()))
@@ -1232,8 +1278,9 @@ class TerminalUI:
             # )
             # surface.blit(code_lbl, (rect.x + 20, hud_y - line_height * 2))
 
-            hint_lbl = self.font.render("[Esc] Save & Quit to Menu", True, TEXT_DIM)
-            surface.blit(hint_lbl, (rect.x + 20, hud_y - line_height))
+            if self.state == "SHOP":
+                hint_lbl = self.font.render("[Esc] Save & Quit to Menu", True, TEXT_DIM)
+                surface.blit(hint_lbl, (rect.x + 20, hud_y - line_height))
 
             c = self.active_character
             r, g, b = map(int, c["color"].split())
