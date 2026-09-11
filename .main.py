@@ -633,7 +633,11 @@ def main():
             objective_pos = msg.get("objective_pos")
             if objective_pos:
                 active_objective_pos = tuple(objective_pos)
-            if remote_objective and remote_objective.get("type") == "roaming" and target:
+            if (
+                remote_objective
+                and remote_objective.get("type") == "roaming"
+                and target
+            ):
                 if terminal.network_mode and local_client_id in players:
                     local_position = (
                         players[local_client_id]["x"],
@@ -1053,11 +1057,11 @@ def main():
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
                     blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                    if (
-                        blocking_item
-                        not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
-                        and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
-                    ):
+                    if blocking_item not in (
+                        OBJECTIVE_TERMINAL,
+                        SHOP_TERMINAL,
+                        ROAMING_SIGNAL,
+                    ) and is_walkable(dungeon, doors, target_x, target_y, dx, dy):
                         player_x, player_y = target_x, target_y
 
                 time_since_last_move = 0
@@ -1233,11 +1237,11 @@ def main():
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
                 blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                if (
-                    blocking_item
-                    not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
-                    and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
-                ):
+                if blocking_item not in (
+                    OBJECTIVE_TERMINAL,
+                    SHOP_TERMINAL,
+                    ROAMING_SIGNAL,
+                ) and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
                     net_server.update_player_position(
                         cid, target_x, target_y, pdata["facing"]
                     )
