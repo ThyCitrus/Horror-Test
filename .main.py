@@ -21,6 +21,7 @@ from dungeon_gen import (
     SHOP_TERMINAL,
     OBJECTIVE_TERMINAL,
     OBJECTIVE_GLYPH,
+    OBJECTIVE_COMPLETE_GLYPH,
     AGNATE_WARPED_SPAWN,
     DATA_SCRAP,
     ROAMING_SIGNAL,
@@ -77,6 +78,8 @@ DOOR_INTERACT_RANGE = 2
 DOOR_COYOTE_TIME_MS = 500
 ITEM_GLYPH = "?"
 ITEM_COLOR = (230, 200, 60)
+OBJECTIVE_COLOR = (70, 150, 255)
+OBJECTIVE_COMPLETE_COLOR = (110, 230, 190)
 LIGHT_ITEM_IDS = {"Flashlight", "Lantern"}
 ITEM_NAMES = {
     "TestItem": "Test Item",
@@ -166,55 +169,29 @@ def main():
     last_door_target = None
     last_door_target_time = 0
 
-    def make_floor_objective(number, floor_items):
-        objective_type = ("fast", "long", "roaming")[(number - 1) % 3]
-        target_count = sum(
-            item["item_id"] in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
-            for item in floor_items.values()
+    def make_floor_objective(number, floor_items, terminal_pos=None):
+        item = floor_items.get(tuple(terminal_pos), {}) if terminal_pos else {}
+        game_name = item.get("objective_game", "Arrow Sequence")
+        objective_type = (
+            "roaming"
+            if game_name == "Hotspot Signal Tracker"
+            else "fast"
+            if game_name in ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner")
+            else "long"
         )
-        game_name = {
-            "fast": ["Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"][
-                (number - 1) % 3
-            ],
-            "long": [
-                "Grid Fill/Flow Puzzle",
-                "Memory Pattern / Simon",
-                "Active Hold / Pong",
-            ][(number - 1) % 3],
-            "roaming": "Hotspot Signal Tracker",
-        }[objective_type]
-        if objective_type == "long":
-            title, required = f"{game_name}: recover three data fragments", 3
-        elif objective_type == "roaming":
-            title, required = game_name, 1
-        else:
-            title, required = game_name, 1
-        if objective_type == "roaming":
-            target_count = 1
-        target = next(
-            (
-                pos
-                for pos, item in floor_items.items()
-                if item["item_id"]
-                == (
-                    ROAMING_SIGNAL
-                    if objective_type == "roaming"
-                    else OBJECTIVE_TERMINAL
-                )
-            ),
-            None,
-        )
+        target = tuple(terminal_pos) if terminal_pos else None
+        required = 1
         return {
-            "id": f"floor-{number}-{objective_type}",
+            "id": f"floor-{number}-{target or game_name}",
             "type": objective_type,
             "game": game_name,
-            "title": title,
+            "title": game_name,
             "progress": 0,
             "required": required,
-            "target_count": target_count,
+            "target_count": 1,
             "target_progress": 0,
             "target": list(target) if target else None,
-            "completed": False,
+            "completed": bool(item.get("objective_completed")),
             "terminal_prompt": f"{game_name.upper()} // EXECUTE",
         }
 
@@ -228,7 +205,7 @@ def main():
         if player_count is None:
             player_count = get_player_count()
         dungeon, doors, items = build_floor_dungeon(number, seed, player_count)
-        objective = make_floor_objective(number, items)
+        objective = None
 
     def narrative_for_floor(number, objective_data=None):
         hooks = {
@@ -443,9 +420,6 @@ def main():
         if terminal.network_mode and net_server is None:
             if net_client:
                 net_client.send_objective_complete()
-            if active_objective_pos is not None:
-                items.pop(active_objective_pos, None)
-                active_objective_pos = None
             return "Puzzle solved; upload request sent to host."
         if (
             objective["type"] == "long"
@@ -464,13 +438,8 @@ def main():
         if active_objective_pos is not None:
             item = items.get(active_objective_pos)
             if item and item.get("item_id") in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
-                items.pop(active_objective_pos, None)
+                item["objective_completed"] = True
             active_objective_pos = None
-        else:
-            for item_pos, item_data in list(items.items()):
-                if item_data.get("item_id") == ROAMING_SIGNAL:
-                    items.pop(item_pos, None)
-                    break
         text = f"Objective complete: {objective['title']}."
         terminal.add_system_event(text)
         if terminal.active_character:
@@ -891,11 +860,16 @@ def main():
                             )
                     elif item_id == DATA_SCRAP and terminal.network_mode:
                         net_client.send_pickup(*pos)
-                    elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                    elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL) and not items[pos].get(
+                        "objective_completed"
+                    ):
                         if terminal.network_mode:
                             net_client.send_interact(*pos)
                         elif item_id == OBJECTIVE_TERMINAL:
                             active_objective_pos = pos
+                            objective = make_floor_objective(
+                                floor_number, items, pos
+                            )
                             terminal.open_objective_terminal(objective)
                         elif objective and not objective.get("completed"):
                             candidates = [
@@ -915,7 +889,11 @@ def main():
                                 )
                                 active_objective_pos = pos
                                 terminal.start_signal_tracker(
-                                    objective, target, (player_x, player_y)
+                                    make_floor_objective(
+                                        floor_number, items, pos
+                                    ),
+                                    target,
+                                    (player_x, player_y),
                                 )
                     elif terminal.network_mode:
                         net_client.send_pickup(*pos)
@@ -1093,6 +1071,10 @@ def main():
             net_server.set_items_snapshot(items)
             for cid in net_server.consume_pending_objective_completions():
                 active_objective_pos = active_network_objectives.pop(cid, None)
+                if active_objective_pos is not None:
+                    objective = make_floor_objective(
+                        floor_number, items, active_objective_pos
+                    )
                 complete_objective()
             for cid, ix, iy in net_server.consume_pending_interacts():
                 player_state = net_server.get_players_snapshot().get(cid)
@@ -1109,6 +1091,9 @@ def main():
                 elif (ix, iy) in items:
                     item_id = items[(ix, iy)]["item_id"]
                     if item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                        terminal_objective = make_floor_objective(
+                            floor_number, items, (ix, iy)
+                        )
                         player_pos = (player_state["x"], player_state["y"])
                         target = None
                         if item_id == ROAMING_SIGNAL:
@@ -1132,7 +1117,7 @@ def main():
                         active_network_objectives[cid] = (ix, iy)
                         net_server.send_objective_start(
                             cid,
-                            objective,
+                            terminal_objective,
                             target,
                             objective_pos=(ix, iy),
                         )
@@ -1536,9 +1521,12 @@ def main():
                 draw_char, animating = door_render_info(dungeon, doors, wx, wy)
                 is_wall_like, should_stretch = False, False
             elif (wx, wy) in items:
-                item_id = items[(wx, wy)]["item_id"]
+                item = items[(wx, wy)]
+                item_id = item["item_id"]
                 draw_char, is_wall_like, should_stretch = (
-                    ITEM_GLYPHS.get(item_id, ITEM_GLYPH),
+                    OBJECTIVE_COMPLETE_GLYPH
+                    if item.get("objective_completed")
+                    else ITEM_GLYPHS.get(item_id, ITEM_GLYPH),
                     False,
                     False,
                 )
@@ -1596,7 +1584,14 @@ def main():
                     base_tile_color = (155, 55, 55) if is_wall_like else (72, 32, 32)
                 else:
                     base_tile_color = (
-                        ITEM_COLOR
+                        OBJECTIVE_COMPLETE_COLOR
+                        if (wx, wy) in items
+                        and items[(wx, wy)].get("objective_completed")
+                        else OBJECTIVE_COLOR
+                        if (wx, wy) in items
+                        and items[(wx, wy)]["item_id"]
+                        in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
+                        else ITEM_COLOR
                         if (wx, wy) in items
                         else WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
                     )

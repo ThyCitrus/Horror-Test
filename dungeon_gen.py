@@ -20,6 +20,7 @@ OBJECTIVE_TERMINAL = "ObjectiveTerminal"
 DATA_SCRAP = "DataScrap"
 ROAMING_SIGNAL = "RoamingSignal"
 OBJECTIVE_GLYPH = "◙"
+OBJECTIVE_COMPLETE_GLYPH = "○"
 AGNATE_WARPED_SPAWN = "AgnateWarpedSpawn"
 TUTORIAL_FLOOR_MAX = 5
 WARPED_FLOOR_MIN_NUMBER = 6
@@ -251,7 +252,11 @@ def build_warped_floor_dungeon(floor_number, seed, tiles, player_count=1):
         marker_pos = warped_floor[1] if len(warped_floor) > 1 else warped_floor[0]
         tiles[ladder_pos] = LADDER
         item_map[marker_pos] = {"item_id": AGNATE_WARPED_SPAWN}
-        item_map[warped_floor[-1]] = {"item_id": OBJECTIVE_TERMINAL}
+        item_map[warped_floor[-1]] = {
+            "item_id": OBJECTIVE_TERMINAL,
+            "objective_game": "Arrow Sequence",
+            "objective_completed": False,
+        }
     return tiles, {}, item_map
 
 
@@ -269,13 +274,12 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     occupied = set(ladder_positions)
     shop_floors_visited = max(0, (floor_number - 1) // 3)
     items = {}
-    objective_type = ("fast", "long", "roaming")[(floor_number - 1) % 3]
-    if objective_type == "roaming":
-        terminal_count = 1
-        terminal_item_id = ROAMING_SIGNAL
-    else:
-        terminal_count = max(1, math.ceil(room_count / 10))
-        terminal_item_id = OBJECTIVE_TERMINAL
+    terminal_count = max(1, math.ceil(room_count / 10))
+    hotspot_spawned = False
+    terminal_games = {
+        "fast": ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"),
+        "long": ("Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"),
+    }
 
     strict_pool = [
         pos for pos in floors
@@ -310,7 +314,22 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     if terminal_pool:
         rng.shuffle(terminal_pool)
         for pos in terminal_pool[:terminal_count]:
-            items[pos] = {"item_id": terminal_item_id}
+            roll = rng.random()
+            if roll < 0.10 and not hotspot_spawned:
+                item_id = ROAMING_SIGNAL
+                game = "Hotspot Signal Tracker"
+                hotspot_spawned = True
+            elif roll < 0.60:
+                item_id = OBJECTIVE_TERMINAL
+                game = rng.choice(terminal_games["fast"])
+            else:
+                item_id = OBJECTIVE_TERMINAL
+                game = rng.choice(terminal_games["long"])
+            items[pos] = {
+                "item_id": item_id,
+                "objective_game": game,
+                "objective_completed": False,
+            }
             occupied.add(pos)
     else:
         blob = build_agnate_annex(tiles, rng)
