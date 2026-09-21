@@ -20,6 +20,12 @@ OBJECTIVE_TERMINAL = "ObjectiveTerminal"
 DATA_SCRAP = "DataScrap"
 ROAMING_SIGNAL = "RoamingSignal"
 OBJECTIVE_GLYPH = "◙"
+AGNATE_WARPED_SPAWN = "AgnateWarpedSpawn"
+TUTORIAL_FLOOR_MAX = 5
+WARPED_FLOOR_MIN_NUMBER = 6
+WARPED_FLOOR_CHANCE_PERCENT = 3
+WARPED_STRUCTURE_MULTIPLIER = 2
+WARPED_BUILD_ATTEMPTS = 10
 TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS = 5
 TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS = 7
 ANNEX_ATTACH_ATTEMPTS = 10
@@ -139,6 +145,19 @@ def is_valid_terminal_spot(
     return not require_wall or any(tiles.get(pos) == WALL for pos in neighbors8)
 
 
+def is_warped_seed(seed, floor_number):
+    """Stable hidden omen: later floors can become warped without altering the seed."""
+    if floor_number < WARPED_FLOOR_MIN_NUMBER:
+        return False
+    omen_seed = (
+        (seed * 0x9E3779B1)
+        ^ (floor_number * 0x85EBCA77)
+        ^ 0xA61A7E
+    )
+    omen_rng = random.Random(omen_seed)
+    return omen_rng.randrange(100) < WARPED_FLOOR_CHANCE_PERCENT
+
+
 def build_agnate_annex(tiles, rng, attempts=ANNEX_ATTACH_ATTEMPTS):
     """Build a detached irregular annex when no terminal spot is available."""
     floors = [pos for pos, tile in tiles.items() if tile == FLOOR]
@@ -185,6 +204,57 @@ def build_agnate_annex(tiles, rng, attempts=ANNEX_ATTACH_ATTEMPTS):
     return None
 
 
+def build_warped_floor_dungeon(floor_number, seed, tiles, player_count=1):
+    """Build a warped floor as a special aftermath of a destabilized sector."""
+    rng = random.Random(seed + floor_number * 7919 + 9973)
+    item_map = {}
+    floors = [pos for pos, tile in tiles.items() if tile == FLOOR]
+    if not floors:
+        return tiles, {}, item_map
+
+    anchor = rng.choice(floors)
+    cx = anchor[0] + rng.randint(18, 26)
+    cy = anchor[1] + rng.randint(18, 26)
+    blob_positions = set()
+    for _ in range(rng.randint(5, 8)):
+        lobe_cx = cx + rng.randint(-8, 8)
+        lobe_cy = cy + rng.randint(-8, 8)
+        lobe_r = rng.randint(7, 11)
+        for x in range(lobe_cx - lobe_r, lobe_cx + lobe_r + 1):
+            for y in range(lobe_cy - lobe_r, lobe_cy + lobe_r + 1):
+                if (x - lobe_cx) ** 2 + (y - lobe_cy) ** 2 <= lobe_r ** 2:
+                    blob_positions.add((x, y))
+
+    if not blob_positions:
+        return tiles, {}, item_map
+
+    for pos in blob_positions:
+        tiles[pos] = FLOOR
+    for x, y in blob_positions:
+        for dx, dy in (
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1),
+        ):
+            npos = (x + dx, y + dy)
+            if npos not in blob_positions and tiles.get(npos) != FLOOR:
+                tiles[npos] = WALL
+
+    for x, y in bresenham_line(anchor[0], anchor[1], cx, cy):
+        tiles[(x, y)] = FLOOR
+        tiles[(x + 1, y)] = FLOOR
+        tiles[(x, y + 1)] = FLOOR
+
+    warped_floor = [pos for pos in blob_positions if tiles.get(pos) == FLOOR]
+    if warped_floor:
+        rng.shuffle(warped_floor)
+        ladder_pos = warped_floor[0]
+        marker_pos = warped_floor[1] if len(warped_floor) > 1 else warped_floor[0]
+        tiles[ladder_pos] = LADDER
+        item_map[marker_pos] = {"item_id": AGNATE_WARPED_SPAWN}
+        item_map[warped_floor[-1]] = {"item_id": OBJECTIVE_TERMINAL}
+    return tiles, {}, item_map
+
+
 def build_floor_dungeon(floor_number, seed, player_count=1):
     """Generate a floor with 14 rooms per player plus the floor number."""
     room_count = 14 * max(1, int(player_count)) + floor_number
@@ -229,6 +299,13 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
                 min_floor_neighbors=TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS,
             )
         ]
+    if floor_number > TUTORIAL_FLOOR_MAX and (
+        is_warped_seed(seed, floor_number) or not strict_pool
+    ):
+        warped_tiles, _, warped_items = build_warped_floor_dungeon(
+            floor_number, seed, tiles, player_count
+        )
+        return warped_tiles, {}, warped_items
     terminal_pool = strict_pool or relaxed_pool
     if terminal_pool:
         rng.shuffle(terminal_pool)

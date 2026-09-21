@@ -21,6 +21,7 @@ from dungeon_gen import (
     SHOP_TERMINAL,
     OBJECTIVE_TERMINAL,
     OBJECTIVE_GLYPH,
+    AGNATE_WARPED_SPAWN,
     DATA_SCRAP,
     ROAMING_SIGNAL,
     LADDER,
@@ -84,12 +85,14 @@ ITEM_NAMES = {
     "Map": "Map",
     SHOP_TERMINAL: "Shop Terminal",
     OBJECTIVE_TERMINAL: "Objective Terminal",
+    AGNATE_WARPED_SPAWN: "Agnate Warp Marker",
     DATA_SCRAP: "Data Scrap",
     ROAMING_SIGNAL: "Roaming Signal",
 }  # item_id -> display name, falls back to item_id
 ITEM_GLYPHS = {
     SHOP_TERMINAL: "‰",
     OBJECTIVE_TERMINAL: OBJECTIVE_GLYPH,
+    AGNATE_WARPED_SPAWN: "A",
     DATA_SCRAP: "$",
     ROAMING_SIGNAL: "S",
 }
