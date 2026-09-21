@@ -20,6 +20,10 @@ OBJECTIVE_TERMINAL = "ObjectiveTerminal"
 DATA_SCRAP = "DataScrap"
 ROAMING_SIGNAL = "RoamingSignal"
 OBJECTIVE_GLYPH = "◙"
+TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS = 5
+TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS = 7
+ANNEX_ATTACH_ATTEMPTS = 10
+AGNATE_ANNEX_MARKER = "AgnateAnnexSpawn"
 
 LOOT_TABLE = (
     ("Calculators / Digital Watches", ((100, 70), (500, 25), (1_000, 5))),
@@ -116,6 +120,71 @@ def build_shop_dungeon():
     return tiles, {}, items
 
 
+def is_valid_terminal_spot(
+    tiles, x, y, require_wall=True, min_floor_neighbors=5
+):
+    """Return whether a floor tile is safe and suitable for a terminal."""
+    if tiles.get((x, y)) != FLOOR:
+        return False
+    neighbors8 = [
+        (x + dx, y + dy)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        if (dx, dy) != (0, 0)
+    ]
+    if any(tiles.get(pos) == DOOR for pos in neighbors8):
+        return False
+    if sum(tiles.get(pos) == FLOOR for pos in neighbors8) < min_floor_neighbors:
+        return False
+    return not require_wall or any(tiles.get(pos) == WALL for pos in neighbors8)
+
+
+def build_agnate_annex(tiles, rng, attempts=ANNEX_ATTACH_ATTEMPTS):
+    """Build a detached irregular annex when no terminal spot is available."""
+    floors = [pos for pos, tile in tiles.items() if tile == FLOOR]
+    if not floors:
+        return None
+
+    for _ in range(attempts):
+        anchor_x, anchor_y = rng.choice(floors)
+        angle = rng.uniform(0, 2 * math.pi)
+        distance = rng.randint(18, 26)
+        cx = anchor_x + int(math.cos(angle) * distance)
+        cy = anchor_y + int(math.sin(angle) * distance)
+
+        blob_positions = set()
+        for _ in range(rng.randint(5, 8)):
+            lobe_cx = cx + rng.randint(-6, 6)
+            lobe_cy = cy + rng.randint(-6, 6)
+            lobe_r = rng.randint(6, 10)
+            for x in range(lobe_cx - lobe_r, lobe_cx + lobe_r + 1):
+                for y in range(lobe_cy - lobe_r, lobe_cy + lobe_r + 1):
+                    if (x - lobe_cx) ** 2 + (y - lobe_cy) ** 2 <= lobe_r**2:
+                        blob_positions.add((x, y))
+
+        overlap = sum(tiles.get(pos) == FLOOR for pos in blob_positions)
+        if overlap > len(blob_positions) * 0.1:
+            continue
+
+        for pos in blob_positions:
+            tiles[pos] = FLOOR
+        for x, y in blob_positions:
+            for dx, dy in (
+                (1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1),
+            ):
+                npos = (x + dx, y + dy)
+                if npos not in blob_positions and tiles.get(npos) != FLOOR:
+                    tiles[npos] = WALL
+
+        for x, y in bresenham_line(anchor_x, anchor_y, cx, cy):
+            tiles[(x, y)] = FLOOR
+            tiles[(x + 1, y)] = FLOOR
+            tiles[(x, y + 1)] = FLOOR
+        return blob_positions
+    return None
+
+
 def build_floor_dungeon(floor_number, seed, player_count=1):
     """Generate a floor with 14 rooms per player plus the floor number."""
     room_count = 14 * max(1, int(player_count)) + floor_number
@@ -130,6 +199,58 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     occupied = set(ladder_positions)
     shop_floors_visited = max(0, (floor_number - 1) // 3)
     items = {}
+    objective_type = ("fast", "long", "roaming")[(floor_number - 1) % 3]
+    if objective_type == "roaming":
+        terminal_count = 1
+        terminal_item_id = ROAMING_SIGNAL
+    else:
+        terminal_count = max(1, math.ceil(room_count / 10))
+        terminal_item_id = OBJECTIVE_TERMINAL
+
+    strict_pool = [
+        pos for pos in floors
+        if pos not in occupied
+        and is_valid_terminal_spot(
+            tiles,
+            *pos,
+            require_wall=True,
+            min_floor_neighbors=TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS,
+        )
+    ]
+    relaxed_pool = []
+    if not strict_pool:
+        relaxed_pool = [
+            pos for pos in floors
+            if pos not in occupied
+            and is_valid_terminal_spot(
+                tiles,
+                *pos,
+                require_wall=False,
+                min_floor_neighbors=TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS,
+            )
+        ]
+    terminal_pool = strict_pool or relaxed_pool
+    if terminal_pool:
+        rng.shuffle(terminal_pool)
+        for pos in terminal_pool[:terminal_count]:
+            items[pos] = {"item_id": terminal_item_id}
+            occupied.add(pos)
+    else:
+        blob = build_agnate_annex(tiles, rng)
+        if blob:
+            annex_floor = [pos for pos in blob if tiles.get(pos) == FLOOR]
+            rng.shuffle(annex_floor)
+            terminal_pos = annex_floor[0]
+            ladder_pos = annex_floor[1] if len(annex_floor) > 1 else annex_floor[0]
+            items[terminal_pos] = {"item_id": terminal_item_id}
+            tiles[ladder_pos] = LADDER
+            occupied.update((terminal_pos, ladder_pos))
+        else:
+            print(
+                f"[dungeon_gen] WARNING: floor {floor_number} seed {seed} "
+                "has no valid terminal spot and annex placement failed."
+            )
+
     scrap_pool = [
         pos for pos in floors
         if pos not in occupied and pos not in items
