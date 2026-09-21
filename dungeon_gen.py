@@ -26,25 +26,35 @@ LOOT_TABLE = (
     ("Smart Lightbulb / Thermostat Board", ((1_000, 60), (4_000, 30), (16_000, 10))),
     ("Floppy Disks", ((1_440, 80), (2_880, 20))),
     ("CD-ROM / Audio Discs", ((10_000, 60), (50_000, 40))),
-    ("Old MP3 Player / Digital Camera", ((100_000, 50), (500_000, 30), (2_000_000, 15), (8_000_000, 5))),
-    ("Wi-Fi Router / Smart TV Dongle", ((512_000, 60), (2_000_000, 30), (8_000_000, 10))),
+    (
+        "Old MP3 Player / Digital Camera",
+        ((100_000, 50), (500_000, 30), (2_000_000, 15), (8_000_000, 5)),
+    ),
+    (
+        "Wi-Fi Router / Smart TV Dongle",
+        ((512_000, 60), (2_000_000, 30), (8_000_000, 10)),
+    ),
     ("Game Console Memory Cards", ((8_000, 50), (64_000, 35), (512_000, 15))),
     ("USB Flash Drives", ((1_000_000, 50), (4_000_000, 35), (16_000_000, 15))),
-    ("DRAM / Laptop RAM Sticks", ((4_000_000, 50), (8_000_000, 30), (16_000_000, 15), (32_000_000, 5))),
-    ("Commercial SSDs / Memory Cards", ((32_000_000, 60), (64_000_000, 25), (128_000_000, 10), (256_000_000, 5))),
+    (
+        "DRAM / Laptop RAM Sticks",
+        ((4_000_000, 50), (8_000_000, 30), (16_000_000, 15), (32_000_000, 5)),
+    ),
+    (
+        "Commercial SSDs / Memory Cards",
+        ((32_000_000, 60), (64_000_000, 25), (128_000_000, 10), (256_000_000, 5)),
+    ),
     ("Old Arcade System Board", ((16_000_000, 70), (32_000_000, 20), (64_000_000, 10))),
     ("Drone Flight Controller", ((8_000_000, 50), (32_000_000, 35), (64_000_000, 15))),
-    ("Damaged External Hard Drive", ((250_000_000, 60), (500_000_000, 30), (1_000_000_000, 10))),
-    ("Corrupted Server Drive", ((500_000_000, 70), (1_000_000_000, 25), (2_000_000_000, 5))),
+    (
+        "Damaged External Hard Drive",
+        ((250_000_000, 60), (500_000_000, 30), (1_000_000_000, 10)),
+    ),
+    (
+        "Corrupted Server Drive",
+        ((500_000_000, 70), (1_000_000_000, 25), (2_000_000_000, 5)),
+    ),
 )
-
-TILE_CHAR_MAP = {
-    "#": WALL,
-    ".": FLOOR,
-    "‡": LADDER,
-    "|": FLOOR,
-    "_": FLOOR,
-}
 
 WHITE = (255, 255, 255)
 DOOR = "D"
@@ -116,24 +126,62 @@ def build_shop_dungeon():
     return tiles, {}, items
 
 
+def is_valid_terminal_spot(tiles, x, y):
+    """A terminal tile must sit against a wall (there's something for it
+    to be mounted on), have at least 5 of its 8 surrounding tiles as
+    floor (so it isn't wedged into a tight alcove a player could get
+    boxed into), and not be adjacent to a door (doors shouldn't gate
+    the only approach to a terminal)."""
+    if tiles.get((x, y)) != FLOOR:
+        return False
+    neighbors8 = [
+        (x + dx, y + dy)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        if not (dx == 0 and dy == 0)
+    ]
+    against_wall = any(tiles.get(n) == WALL for n in neighbors8)
+    floor_count = sum(1 for n in neighbors8 if tiles.get(n) == FLOOR)
+    near_door = any(tiles.get(n) == DOOR for n in neighbors8)
+    return against_wall and floor_count >= 5 and not near_door
+
+
 def build_floor_dungeon(floor_number, seed, player_count=1):
     """Generate a floor with 14 rooms per player plus the floor number."""
     room_count = 14 * max(1, int(player_count)) + floor_number
     tiles = generate_dungeon(max_structures=room_count, seed=seed)
     rng = random.Random(seed + floor_number * 7919)
-    floors = [
-        pos for pos, tile in tiles.items() if tile == FLOOR
-    ]
+    floors = [pos for pos, tile in tiles.items() if tile == FLOOR]
     if not floors:
         return tiles, {}, {}
     ladder_positions = [pos for pos, tile in tiles.items() if tile == LADDER]
     occupied = set(ladder_positions)
     shop_floors_visited = max(0, (floor_number - 1) // 3)
     items = {}
-    scrap_pool = [
-        pos for pos in floors
-        if pos not in occupied and pos not in items
+
+    # --- objective terminals ---
+    # Count formula: ceil(room_count / 10). Roaming objectives only ever
+    # track a single hotspot target, so they always place exactly one.
+    objective_type = ("fast", "long", "roaming")[(floor_number - 1) % 3]
+    if objective_type == "roaming":
+        terminal_count = 1
+        terminal_item_id = ROAMING_SIGNAL
+    else:
+        terminal_count = max(1, math.ceil(room_count / 10))
+        terminal_item_id = OBJECTIVE_TERMINAL
+
+    terminal_pool = [
+        pos
+        for pos in floors
+        if pos not in occupied and is_valid_terminal_spot(tiles, *pos)
     ]
+    rng.shuffle(terminal_pool)
+    for pos in terminal_pool[:terminal_count]:
+        items[pos] = {"item_id": terminal_item_id}
+        occupied.add(pos)
+
+    # --- data scrap ---
+    scrap_pool = [pos for pos in floors if pos not in occupied and pos not in items]
     rng.shuffle(scrap_pool)
     scrap_count = min(5, 2 + floor_number // 2)
     for pos in scrap_pool[:scrap_count]:
@@ -156,27 +204,6 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             "value": loot_value,
         }
     return tiles, {}, items
-
-
-def _infer_door_orientation(dungeon, x, y):
-    horizontal_sides = (
-        dungeon.get((x - 1, y), WALL) != WALL and dungeon.get((x + 1, y), WALL) != WALL
-    )
-    return "V" if horizontal_sides else "H"
-
-
-def materialize_door(dungeon, doors, x, y):
-    """Ensures doors[(x,y)] exists for a DOOR tile, inferring orientation
-    from surrounding geometry for procedurally-generated doors that were
-    never hand-authored with an explicit orientation."""
-    if (x, y) not in doors:
-        doors[(x, y)] = {
-            "orientation": _infer_door_orientation(dungeon, x, y),
-            "animating": False,
-            "anim_until": None,
-            "pending_orientation": None,
-        }
-    return doors[(x, y)]
 
 
 def begin_door_toggle(door, now_ms, anim_ms=DOOR_ANIM_MS):

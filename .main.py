@@ -600,7 +600,7 @@ def main():
                     p["look_angle"] = pdata.get("look_angle", 0.0)
 
     def handle_network_message(msg):
-        nonlocal active_seed, dungeon, doors, items, floor_number, objective, shared_bytes
+        nonlocal active_seed, dungeon, doors, items, floor_number, objective, shared_bytes, active_objective_pos
         mtype = msg.get("type")
 
         if mtype == "roster":
