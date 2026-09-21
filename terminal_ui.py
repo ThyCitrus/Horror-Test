@@ -377,29 +377,44 @@ class TerminalUI:
         elif game in ("Sine Wave Tuner", "Sine Wave Signal Tuner"):
             self.objective_game = {
                 "kind": "sine",
-                "values": [5, 5, 5],
-                "targets": [rng.randint(3, 8) for _ in range(3)],
-                "selected": 0,
+                "amplitude": 0.55,
+                "frequency": 3.0,
+                "target_amplitude": 0.3 + rng.random() * 0.5,
+                "target_frequency": 2.0 + rng.random() * 3.0,
             }
         elif game in ("Flow Puzzle", "Grid Fill/Flow Puzzle"):
-            width = height = 4
+            width = height = 6
+            path = [(x, height // 2) for x in range(width)]
+            pipe_types = {}
+            for index, pos in enumerate(path):
+                pipe_types[pos] = "start" if index == 0 else "end" if index == len(path) - 1 else "horizontal"
+            for gy in range(height):
+                for gx in range(width):
+                    pipe_types.setdefault((gx, gy), rng.choice(("corner", "tee", "horizontal", "vertical")))
             self.objective_game = {
                 "kind": "grid",
                 "width": width,
                 "height": height,
                 "cursor": [0, 0],
-                "visited": {(0, 0)},
-                "total": width * height,
+                "path": path,
+                "pipe_types": pipe_types,
+                "rotations": {
+                    pos: 0 if pos in (path[0], path[-1]) else rng.randrange(4)
+                    for pos in pipe_types
+                },
+                "solving": False,
+                "solve_until": 0,
             }
         elif game == "Number Calibration":
             self.objective_game = {
                 "kind": "numbers",
-                "values": [0, 0, 0],
-                "targets": [rng.randint(2, 8) for _ in range(3)],
+                "values": [0, 0, 0, 0, 0],
+                "targets": [rng.randint(0, 9) for _ in range(5)],
                 "selected": 0,
+                "wrong_until": 0,
             }
         elif game == "Memory Pattern / Simon":
-            sequence = [rng.choice(arrows) for _ in range(5)]
+            sequence = [(rng.randrange(9), rng.randrange(9)) for _ in range(5)]
             self.objective_game = {
                 "kind": "simon",
                 "sequence": sequence,
@@ -407,15 +422,16 @@ class TerminalUI:
                 "show_index": 0,
                 "show_until": pygame.time.get_ticks() + 650,
                 "phase": "show",
+                "lit": sequence[0],
+                "cursor": [4, 4],
             }
         elif game == "Active Hold / Pong":
             self.objective_game = {
-                "kind": "hold",
-                "position": [0.5, 0.5],
-                "target": [0.45 + rng.random() * 0.1, 0.45 + rng.random() * 0.1],
-                "progress": 0.0,
-                "elapsed": 0.0,
-                "drift": [rng.choice((-1, 1)), rng.choice((-1, 1))],
+                "kind": "pong",
+                "paddle": 0.5,
+                "ai": 0.5,
+                "ball": [0.5, 0.5],
+                "velocity": [0.35, 0.18],
             }
         else:
             self.objective_game = {"kind": "arrows", "sequence": arrows, "index": 0}
@@ -441,7 +457,10 @@ class TerminalUI:
 
     def _objective_key(self, key):
         game = self.objective_game
-        if not game or key not in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT):
+        if not game or key not in (
+            pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT,
+            pygame.K_RETURN,
+        ):
             return
         kind = game["kind"]
         if kind == "arrows":
@@ -454,81 +473,100 @@ class TerminalUI:
                 self.set_transient("Sequence mismatch — start again.", (255, 100, 100), duration_ms=900)
         elif kind == "sine":
             if key == pygame.K_LEFT:
-                game["selected"] = (game["selected"] - 1) % 3
+                game["frequency"] = max(1.0, game["frequency"] - 0.1)
             elif key == pygame.K_RIGHT:
-                game["selected"] = (game["selected"] + 1) % 3
+                game["frequency"] = min(6.0, game["frequency"] + 0.1)
             elif key == pygame.K_UP:
-                game["values"][game["selected"]] = min(10, game["values"][game["selected"]] + 1)
+                game["amplitude"] = min(1.0, game["amplitude"] + 0.03)
             elif key == pygame.K_DOWN:
-                game["values"][game["selected"]] = max(0, game["values"][game["selected"]] - 1)
-            if game["values"] == game["targets"]:
+                game["amplitude"] = max(0.1, game["amplitude"] - 0.03)
+            amplitude_error = abs(game["amplitude"] - game["target_amplitude"]) / game["target_amplitude"]
+            frequency_error = abs(game["frequency"] - game["target_frequency"]) / game["target_frequency"]
+            if amplitude_error <= 0.10 and frequency_error <= 0.10:
                 self._finish_objective_game()
         elif kind == "grid":
-            dx, dy = {
-                pygame.K_UP: (0, -1),
-                pygame.K_DOWN: (0, 1),
-                pygame.K_LEFT: (-1, 0),
-                pygame.K_RIGHT: (1, 0),
-            }[key]
-            nx, ny = game["cursor"][0] + dx, game["cursor"][1] + dy
-            if not (0 <= nx < game["width"] and 0 <= ny < game["height"]):
-                self.set_transient("That conduit is outside the grid.", (255, 180, 80), duration_ms=700)
-            elif (nx, ny) in game["visited"]:
-                self.set_transient("Flow cannot revisit a covered tile.", (255, 100, 100), duration_ms=900)
-            else:
-                game["cursor"] = [nx, ny]
-                game["visited"].add((nx, ny))
-                if len(game["visited"]) == game["total"]:
-                    self._finish_objective_game()
+            if game["solving"]:
+                return
+            if key in (pygame.K_LEFT, pygame.K_RIGHT):
+                dx = -1 if key == pygame.K_LEFT else 1
+                x, y = game["cursor"]
+                game["rotations"][(x, y)] = (game["rotations"][(x, y)] + dx) % 4
+                if self._flow_is_connected(game):
+                    game["solving"] = True
+                    game["solve_until"] = pygame.time.get_ticks() + 900
+            elif key in (pygame.K_UP, pygame.K_DOWN):
+                dy = -1 if key == pygame.K_UP else 1
+                game["cursor"][1] = (game["cursor"][1] + dy) % game["height"]
         elif kind == "numbers":
             if key == pygame.K_LEFT:
-                game["selected"] = (game["selected"] - 1) % 3
+                game["selected"] = (game["selected"] - 1) % 5
             elif key == pygame.K_RIGHT:
-                game["selected"] = (game["selected"] + 1) % 3
+                game["selected"] = (game["selected"] + 1) % 5
             elif key == pygame.K_UP:
-                game["values"][game["selected"]] = min(9, game["values"][game["selected"]] + 1)
+                game["values"][game["selected"]] = (game["values"][game["selected"]] + 1) % 10
             elif key == pygame.K_DOWN:
-                game["values"][game["selected"]] = max(0, game["values"][game["selected"]] - 1)
-            if game["values"] == game["targets"]:
-                self._finish_objective_game()
+                game["values"][game["selected"]] = (game["values"][game["selected"]] - 1) % 10
+            elif key == pygame.K_RETURN:
+                if game["values"] == game["targets"]:
+                    self._finish_objective_game()
+                else:
+                    game["wrong_until"] = pygame.time.get_ticks() + 500
         elif kind == "simon" and game["phase"] == "input":
-            if key == game["sequence"][game["index"]]:
+            if key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT):
+                dx, dy = {
+                    pygame.K_UP: (0, -1), pygame.K_DOWN: (0, 1),
+                    pygame.K_LEFT: (-1, 0), pygame.K_RIGHT: (1, 0),
+                }[key]
+                x, y = game.get("cursor", [4, 4])
+                game["cursor"] = [max(0, min(8, x + dx)), max(0, min(8, y + dy))]
+                return
+            if key == pygame.K_RETURN and tuple(game.get("cursor", [4, 4])) == game["sequence"][game["index"]]:
                 game["index"] += 1
                 if game["index"] >= len(game["sequence"]):
                     self._finish_objective_game()
             else:
                 game["index"] = 0
                 self.set_transient("Memory lost — repeat from the first tone.", (255, 100, 100), duration_ms=900)
-        elif kind == "hold":
-            push = {
-                pygame.K_UP: (0, -0.13),
-                pygame.K_DOWN: (0, 0.13),
-                pygame.K_LEFT: (-0.13, 0),
-                pygame.K_RIGHT: (0.13, 0),
-            }[key]
-            game["position"][0] = max(0.0, min(1.0, game["position"][0] + push[0]))
-            game["position"][1] = max(0.0, min(1.0, game["position"][1] + push[1]))
+        elif kind == "pong":
+            if key == pygame.K_UP:
+                game["paddle"] = max(0.0, game["paddle"] - 0.08)
+            elif key == pygame.K_DOWN:
+                game["paddle"] = min(1.0, game["paddle"] + 0.08)
 
     def update_objective_game(self, dt_ms):
         """Advance timed modal games and the non-modal roaming tracker."""
         if self.is_modal_game():
             game = self.objective_game
-            if game["kind"] == "simon" and game["phase"] == "show":
+            if game["kind"] == "grid" and game["solving"]:
+                if pygame.time.get_ticks() >= game["solve_until"]:
+                    self._finish_objective_game()
+            elif game["kind"] == "simon" and game["phase"] == "show":
                 if pygame.time.get_ticks() >= game["show_until"]:
+                    game["lit"] = None
                     game["show_index"] += 1
                     if game["show_index"] >= len(game["sequence"]):
                         game["phase"] = "input"
                     else:
+                        game["lit"] = game["sequence"][game["show_index"]]
                         game["show_until"] = pygame.time.get_ticks() + 650
-            elif game["kind"] == "hold":
+            elif game["kind"] == "pong":
                 game["elapsed"] += dt_ms
-                t = game["elapsed"] / 1000.0
-                game["position"][0] = max(0.0, min(1.0, game["position"][0] + math.sin(t * 2.3) * dt_ms * 0.00004 * game["drift"][0]))
-                game["position"][1] = max(0.0, min(1.0, game["position"][1] + math.cos(t * 1.9) * dt_ms * 0.00004 * game["drift"][1]))
-                inside = all(abs(game["position"][i] - game["target"][i]) < 0.16 for i in (0, 1))
-                game["progress"] = max(0.0, game["progress"] + (dt_ms if inside else -dt_ms * 1.5))
-                if game["progress"] >= 7000:
-                    self._finish_objective_game()
+                game["ai"] += (game["ball"][1] - game["ai"]) * dt_ms * 0.002
+                game["ball"][0] += game["velocity"][0] * dt_ms / 1000
+                game["ball"][1] += game["velocity"][1] * dt_ms / 1000
+                if game["ball"][1] <= 0 or game["ball"][1] >= 1:
+                    game["velocity"][1] *= -1
+                if game["ball"][0] <= 0.06:
+                    if abs(game["ball"][1] - game["paddle"]) < 0.16:
+                        game["velocity"][0] = abs(game["velocity"][0])
+                    else:
+                        self._finish_objective_game()
+                elif game["ball"][0] >= 0.94:
+                    if abs(game["ball"][1] - game["ai"]) < 0.16:
+                        game["velocity"][0] = -abs(game["velocity"][0])
+                    else:
+                        game["ball"] = [0.5, 0.5]
+                        game["velocity"][0] = -0.35
         elif self.signal_tracker:
             target = self.signal_tracker["target"]
             self.signal_tracker["last_distance"] = self._tracker_distance(self.signal_tracker["player"], target)
@@ -536,6 +574,16 @@ class TerminalUI:
     @staticmethod
     def _tracker_distance(a, b):
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    @staticmethod
+    def _flow_is_connected(game):
+        path = game["path"]
+        for index, pos in enumerate(path):
+            if index == 0 or index == len(path) - 1:
+                continue
+            if game["rotations"][pos] % 2 != 0:
+                return False
+        return True
 
     def start_signal_tracker(self, objective, target, player_pos):
         self.objective = objective
@@ -578,7 +626,7 @@ class TerminalUI:
         # never see these events while a terminal is connected.
         if self.is_modal_game():
             if event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_BACKSPACE):
                     self._cancel_objective_game()
                 else:
                     self._objective_key(event.key)
@@ -1391,60 +1439,96 @@ class TerminalUI:
             y += line_height
             surface.blit(self.font.render(f"Input: {entered or '(none)'}", True, (120, 255, 160)), (rect.x + 35, y))
         elif kind == "sine":
-            labels = ("Amplitude", "Wavelength", "Frequency")
-            surface.blit(self.font.render("Tune every control to its target.", True, TEXT_WHITE), (rect.x + 20, y))
-            y += line_height
-            for i, label in enumerate(labels):
-                color = (255, 220, 100) if i == game["selected"] else TEXT_WHITE
-                surface.blit(self.font.render(f"{'>' if i == game['selected'] else ' '} {label:<11} {game['values'][i]:2d} / {game['targets'][i]:2d}", True, color), (rect.x + 30, y))
-                y += line_height
+            surface.blit(self.font.render("Match the green signal with the white signal.", True, TEXT_WHITE), (rect.x + 20, y))
+            graph = pygame.Rect(rect.x + 30, y + line_height, 420, 170)
+            pygame.draw.rect(surface, (10, 20, 20), graph)
+            self._draw_wave(surface, graph, game["target_amplitude"], game["target_frequency"], (80, 220, 120))
+            self._draw_wave(surface, graph, game["amplitude"], game["frequency"], TEXT_WHITE)
+            y += graph.height + line_height
+            surface.blit(self.font.render(
+                f"Amplitude {game['amplitude']:.2f}  Frequency {game['frequency']:.1f}  [Up/Down amplitude, Left/Right frequency]",
+                True, TEXT_DIM), (rect.x + 20, y))
         elif kind == "grid":
-            surface.blit(self.font.render("Route the flow through every tile exactly once.", True, TEXT_WHITE), (rect.x + 20, y))
+            surface.blit(self.font.render("Rotate pipes until the green path connects left to right.", True, TEXT_WHITE), (rect.x + 20, y))
             y += line_height
             for gy in range(game["height"]):
                 row = []
                 for gx in range(game["width"]):
                     pos = (gx, gy)
-                    if pos == tuple(game["cursor"]):
-                        cell = "[@]"
-                    elif pos in game["visited"]:
-                        cell = "[·]"
-                    else:
-                        cell = "[ ]"
+                    cell = self._pipe_glyph(game["pipe_types"][pos], game["rotations"][pos])
                     row.append(cell)
-                surface.blit(self.bold_font.render(" ".join(row), True, (120, 255, 160)), (rect.x + 35, y))
+                color = (80, 255, 140) if game["solving"] and gy == game["height"] // 2 else TEXT_WHITE
+                surface.blit(self.bold_font.render(" ".join(row), True, color), (rect.x + 35, y))
                 y += line_height
-            surface.blit(self.font.render(f"Covered {len(game['visited'])}/{game['total']} tiles", True, TEXT_DIM), (rect.x + 35, y))
+            surface.blit(self.font.render("Up/Down move; Left/Right rotate.", True, TEXT_DIM), (rect.x + 35, y))
         elif kind == "numbers":
-            surface.blit(self.font.render("Select a column, then calibrate its value.", True, TEXT_WHITE), (rect.x + 20, y))
+            surface.blit(self.font.render("Align the five-digit access code and press Enter.", True, TEXT_WHITE), (rect.x + 20, y))
             y += line_height
-            for i, (value, target) in enumerate(zip(game["values"], game["targets"])):
-                color = (255, 220, 100) if i == game["selected"] else TEXT_WHITE
-                surface.blit(self.font.render(f"{'>' if i == game['selected'] else ' '} Dial {i + 1}: {value} / {target}", True, color), (rect.x + 35, y))
-                y += line_height
+            center = rect.centerx
+            for i, value in enumerate(game["values"]):
+                distance = abs(i - game["selected"])
+                size = max(18, 42 - distance * 8)
+                font = pygame.font.SysFont("consolas", size, bold=True)
+                color = (255, 80, 80) if pygame.time.get_ticks() < game["wrong_until"] else (255, 220, 100) if i == game["selected"] else (220 - distance * 35,) * 3
+                text = font.render(str(value), True, color)
+                surface.blit(text, (center + (i - 2) * 58 - text.get_width() // 2, y))
+            y += 58
+            surface.blit(self.font.render("Left/Right select; Up/Down change; Enter submit.", True, TEXT_DIM), (rect.x + 20, y))
         elif kind == "simon":
             if game["phase"] == "show":
-                shown = arrow_names[game["sequence"][game["show_index"]]]
-                surface.blit(self.bold_font.render(f"MEMORIZE: {shown}", True, (255, 220, 100)), (rect.x + 30, y))
+                lit = game["sequence"][game["show_index"]]
+                surface.blit(self.bold_font.render(f"MEMORIZE POSITION {lit[0] + 1},{lit[1] + 1}", True, (255, 220, 100)), (rect.x + 30, y))
             else:
-                surface.blit(self.font.render("Repeat the pattern with the arrow keys.", True, TEXT_WHITE), (rect.x + 20, y))
+                surface.blit(self.font.render("Move the cursor and press Enter for each position.", True, TEXT_WHITE), (rect.x + 20, y))
                 y += line_height
                 surface.blit(self.font.render(f"Input: {game['index']}/{len(game['sequence'])}", True, TEXT_DIM), (rect.x + 35, y))
-        elif kind == "hold":
-            surface.blit(self.font.render("Tap arrows to hold the signal inside the target.", True, TEXT_WHITE), (rect.x + 20, y))
+            self._render_simon_grid(surface, rect, y + line_height, game)
+        elif kind == "pong":
+            surface.blit(self.font.render("Defeat 4413. Up/Down moves your paddle.", True, TEXT_WHITE), (rect.x + 20, y))
             y += line_height
             box = pygame.Rect(rect.x + 35, y, 280, 150)
             pygame.draw.rect(surface, (25, 25, 35), box)
-            target_x = box.x + int(game["target"][0] * box.width)
-            target_y = box.y + int(game["target"][1] * box.height)
-            pygame.draw.circle(surface, (80, 220, 120), (target_x, target_y), 24, 2)
-            dot_x = box.x + int(game["position"][0] * box.width)
-            dot_y = box.y + int(game["position"][1] * box.height)
-            pygame.draw.circle(surface, (255, 220, 100), (dot_x, dot_y), 8)
-            y += box.height + 8
-            surface.blit(self.font.render(f"Hold progress: {min(100, int(game['progress'] / 70))}%", True, TEXT_WHITE), (rect.x + 35, y))
+            pygame.draw.rect(surface, (80, 220, 120), (box.x + 8, box.y + int(game["paddle"] * box.height) - 18, 6, 36))
+            pygame.draw.rect(surface, (255, 100, 100), (box.right - 14, box.y + int(game["ai"] * box.height) - 18, 6, 36))
+            pygame.draw.circle(surface, TEXT_WHITE, (box.x + int(game["ball"][0] * box.width), box.y + int(game["ball"][1] * box.height)), 5)
         y += line_height + 8
-        surface.blit(self.font.render("[Arrow keys] Play    [Esc/Q] Disconnect", True, TEXT_DIM), (rect.x + 20, y))
+        surface.blit(self.font.render("[Arrow keys] Play    [Backspace] Disconnect", True, TEXT_DIM), (rect.x + 20, y))
+
+    @staticmethod
+    def _draw_wave(surface, rect, amplitude, frequency, color):
+        points = []
+        for index in range(rect.width):
+            phase = index / max(1, rect.width) * math.tau * frequency
+            points.append((rect.x + index, rect.centery - int(math.sin(phase) * amplitude * rect.height * 0.42)))
+        pygame.draw.lines(surface, color, False, points, 2)
+
+    @staticmethod
+    def _pipe_glyph(pipe_type, rotation):
+        if pipe_type == "start":
+            return ("╣", "╩", "╠", "╦")[rotation % 4]
+        if pipe_type == "end":
+            return ("╠", "╦", "╣", "╩")[rotation % 4]
+        glyphs = {
+            "horizontal": ("═", "║", "═", "║"),
+            "vertical": ("║", "═", "║", "═"),
+            "corner": ("╔", "╗", "╝", "╚"),
+            "tee": ("╦", "╣", "╩", "╠"),
+        }
+        return glyphs[pipe_type][rotation % 4]
+
+    @staticmethod
+    def _render_simon_grid(surface, rect, y, game):
+        size = 9
+        cell = 24
+        left = rect.centerx - size * cell // 2
+        for row in range(size):
+            for col in range(size):
+                color = (40, 60, 70)
+                if game.get("phase") == "show" and game.get("lit") == (col, row):
+                    color = (230, 230, 230)
+                if game.get("phase") == "input" and game.get("cursor") == [col, row]:
+                    color = (80, 220, 255)
+                pygame.draw.rect(surface, color, (left + col * cell, y + row * cell, cell - 2, cell - 2))
 
     def render_minimap(
         self,
