@@ -216,6 +216,26 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     return tiles, {}, items
 
 
+def _infer_door_orientation(dungeon, x, y):
+    horizontal_sides = (
+        dungeon.get((x - 1, y), WALL) != WALL
+        and dungeon.get((x + 1, y), WALL) != WALL
+    )
+    return "V" if horizontal_sides else "H"
+
+
+def materialize_door(dungeon, doors, x, y):
+    """Ensure a procedurally-generated door has runtime state."""
+    if (x, y) not in doors:
+        doors[(x, y)] = {
+            "orientation": _infer_door_orientation(dungeon, x, y),
+            "animating": False,
+            "anim_until": None,
+            "pending_orientation": None,
+        }
+    return doors[(x, y)]
+
+
 def begin_door_toggle(door, now_ms, anim_ms=DOOR_ANIM_MS):
     if door["animating"]:
         return  # mid-swing already; ignore repeat interacts
