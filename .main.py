@@ -21,6 +21,7 @@ from dungeon_gen import (
     SHOP_TERMINAL,
     OBJECTIVE_TERMINAL,
     OBJECTIVE_GLYPH,
+    AGNATE_WARPED_SPAWN,
     DATA_SCRAP,
     ROAMING_SIGNAL,
     LADDER,
@@ -84,12 +85,14 @@ ITEM_NAMES = {
     "Map": "Map",
     SHOP_TERMINAL: "Shop Terminal",
     OBJECTIVE_TERMINAL: "Objective Terminal",
+    AGNATE_WARPED_SPAWN: "Agnate Warp Marker",
     DATA_SCRAP: "Data Scrap",
     ROAMING_SIGNAL: "Roaming Signal",
 }  # item_id -> display name, falls back to item_id
 ITEM_GLYPHS = {
     SHOP_TERMINAL: "‰",
     OBJECTIVE_TERMINAL: OBJECTIVE_GLYPH,
+    AGNATE_WARPED_SPAWN: "A",
     DATA_SCRAP: "$",
     ROAMING_SIGNAL: "S",
 }
@@ -225,7 +228,7 @@ def main():
         if player_count is None:
             player_count = get_player_count()
         dungeon, doors, items = build_floor_dungeon(number, seed, player_count)
-        objective = None
+        objective = make_floor_objective(number, items)
 
     def narrative_for_floor(number, objective_data=None):
         hooks = {
@@ -294,7 +297,7 @@ def main():
                 objective = None
             else:
                 load_floor(floor_number, active_seed)
-                objective = None
+                objective = make_floor_objective(floor_number, items)
             shared_bytes = char_data.get("bytes", char_data.get("gold", 0))
             preview_floors = [pos for pos, c in dungeon.items() if c in (FLOOR, LADDER)]
             default_pos = preview_floors[0] if preview_floors else (0, 0)
@@ -608,7 +611,7 @@ def main():
             active_seed = seed
             floor_number = msg.get("floor", floor_number)
             shared_bytes = msg.get("shared_bytes", shared_bytes)
-            objective = None
+            objective = msg.get("objective")
             player_count = msg.get("player_count", 1)
             if seed == LOBBY_SEED:
                 dungeon, doors, items = build_lobby_dungeon()
@@ -697,7 +700,7 @@ def main():
             }
             floor_number = msg.get("floor", floor_number)
             shared_bytes = msg.get("shared_bytes", shared_bytes)
-            objective = None
+            objective = msg.get("objective", objective)
             if is_host:
                 net_server.update_player_position(
                     local_client_id, player_x, player_y, player_facing
@@ -727,7 +730,7 @@ def main():
                 doors = {}
             floor_number = msg.get("floor", floor_number)
             shared_bytes = msg.get("shared_bytes", shared_bytes)
-            objective = None
+            objective = msg.get("objective", objective)
             if net_server is None and "doors" in msg:
                 doors.clear()
                 for key, door_data in msg["doors"].items():
@@ -908,6 +911,32 @@ def main():
                             )
                     elif item_id == DATA_SCRAP and terminal.network_mode:
                         net_client.send_pickup(*pos)
+                    elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                        if terminal.network_mode:
+                            net_client.send_interact(*pos)
+                        elif item_id == OBJECTIVE_TERMINAL:
+                            active_objective_pos = pos
+                            terminal.open_objective_terminal(objective)
+                        elif objective and not objective.get("completed"):
+                            candidates = [
+                                candidate
+                                for candidate, tile in dungeon.items()
+                                if tile == FLOOR
+                                and candidate not in items
+                                and abs(candidate[0] - player_x)
+                                + abs(candidate[1] - player_y)
+                                >= 6
+                            ]
+                            if candidates:
+                                target = max(
+                                    candidates,
+                                    key=lambda candidate: abs(candidate[0] - player_x)
+                                    + abs(candidate[1] - player_y),
+                                )
+                                active_objective_pos = pos
+                                terminal.start_signal_tracker(
+                                    objective, target, (player_x, player_y)
+                                )
                     elif terminal.network_mode:
                         net_client.send_pickup(*pos)
                     else:
@@ -1083,6 +1112,9 @@ def main():
         if net_server is not None:
             net_server.set_doors_snapshot(doors)
             net_server.set_items_snapshot(items)
+            for cid in net_server.consume_pending_objective_completions():
+                active_objective_pos = active_network_objectives.pop(cid, None)
+                complete_objective()
             for cid, ix, iy in net_server.consume_pending_interacts():
                 player_state = net_server.get_players_snapshot().get(cid)
                 if not player_state:
@@ -1097,7 +1129,34 @@ def main():
                     begin_door_toggle(door, pygame.time.get_ticks())
                 elif (ix, iy) in items:
                     item_id = items[(ix, iy)]["item_id"]
-                    continue
+                    if item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                        player_pos = (player_state["x"], player_state["y"])
+                        target = None
+                        if item_id == ROAMING_SIGNAL:
+                            candidates = [
+                                candidate
+                                for candidate, tile in dungeon.items()
+                                if tile == FLOOR
+                                and candidate not in items
+                                and abs(candidate[0] - player_pos[0])
+                                + abs(candidate[1] - player_pos[1])
+                                >= 6
+                            ]
+                            if candidates:
+                                target = max(
+                                    candidates,
+                                    key=lambda candidate: abs(
+                                        candidate[0] - player_pos[0]
+                                    )
+                                    + abs(candidate[1] - player_pos[1]),
+                                )
+                        active_network_objectives[cid] = (ix, iy)
+                        net_server.send_objective_start(
+                            cid,
+                            objective,
+                            target,
+                            objective_pos=(ix, iy),
+                        )
             for cid, ix, iy in net_server.consume_pending_pickups():
                 pos = (ix, iy)
                 if pos in items:
@@ -1111,7 +1170,7 @@ def main():
                                 "value": item.get("value", 10),
                             },
                         )
-                        net_server.set_world_state(objective=None)
+                        net_server.set_world_state(objective=objective)
                     else:
                         net_server.add_item_to_player(cid, item_id)
                         if item_id in LIGHT_ITEM_IDS:
