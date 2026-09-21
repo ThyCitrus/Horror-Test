@@ -37,25 +37,35 @@ LOOT_TABLE = (
     ("Smart Lightbulb / Thermostat Board", ((1_000, 60), (4_000, 30), (16_000, 10))),
     ("Floppy Disks", ((1_440, 80), (2_880, 20))),
     ("CD-ROM / Audio Discs", ((10_000, 60), (50_000, 40))),
-    ("Old MP3 Player / Digital Camera", ((100_000, 50), (500_000, 30), (2_000_000, 15), (8_000_000, 5))),
-    ("Wi-Fi Router / Smart TV Dongle", ((512_000, 60), (2_000_000, 30), (8_000_000, 10))),
+    (
+        "Old MP3 Player / Digital Camera",
+        ((100_000, 50), (500_000, 30), (2_000_000, 15), (8_000_000, 5)),
+    ),
+    (
+        "Wi-Fi Router / Smart TV Dongle",
+        ((512_000, 60), (2_000_000, 30), (8_000_000, 10)),
+    ),
     ("Game Console Memory Cards", ((8_000, 50), (64_000, 35), (512_000, 15))),
     ("USB Flash Drives", ((1_000_000, 50), (4_000_000, 35), (16_000_000, 15))),
-    ("DRAM / Laptop RAM Sticks", ((4_000_000, 50), (8_000_000, 30), (16_000_000, 15), (32_000_000, 5))),
-    ("Commercial SSDs / Memory Cards", ((32_000_000, 60), (64_000_000, 25), (128_000_000, 10), (256_000_000, 5))),
+    (
+        "DRAM / Laptop RAM Sticks",
+        ((4_000_000, 50), (8_000_000, 30), (16_000_000, 15), (32_000_000, 5)),
+    ),
+    (
+        "Commercial SSDs / Memory Cards",
+        ((32_000_000, 60), (64_000_000, 25), (128_000_000, 10), (256_000_000, 5)),
+    ),
     ("Old Arcade System Board", ((16_000_000, 70), (32_000_000, 20), (64_000_000, 10))),
     ("Drone Flight Controller", ((8_000_000, 50), (32_000_000, 35), (64_000_000, 15))),
-    ("Damaged External Hard Drive", ((250_000_000, 60), (500_000_000, 30), (1_000_000_000, 10))),
-    ("Corrupted Server Drive", ((500_000_000, 70), (1_000_000_000, 25), (2_000_000_000, 5))),
+    (
+        "Damaged External Hard Drive",
+        ((250_000_000, 60), (500_000_000, 30), (1_000_000_000, 10)),
+    ),
+    (
+        "Corrupted Server Drive",
+        ((500_000_000, 70), (1_000_000_000, 25), (2_000_000_000, 5)),
+    ),
 )
-
-TILE_CHAR_MAP = {
-    "#": WALL,
-    ".": FLOOR,
-    "‡": LADDER,
-    "|": FLOOR,
-    "_": FLOOR,
-}
 
 WHITE = (255, 255, 255)
 DOOR = "D"
@@ -128,7 +138,11 @@ def build_shop_dungeon():
 
 
 def is_valid_terminal_spot(
-    tiles, x, y, require_wall=True, min_floor_neighbors=5
+    tiles,
+    x,
+    y,
+    require_wall=True,
+    min_floor_neighbors=TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS,
 ):
     """Return whether a floor tile is safe and suitable for a terminal."""
     if tiles.get((x, y)) != FLOOR:
@@ -137,7 +151,7 @@ def is_valid_terminal_spot(
         (x + dx, y + dy)
         for dx in (-1, 0, 1)
         for dy in (-1, 0, 1)
-        if (dx, dy) != (0, 0)
+        if not (dx == 0 and dy == 0)
     ]
     if any(tiles.get(pos) == DOOR for pos in neighbors8):
         return False
@@ -258,16 +272,12 @@ def build_warped_floor_dungeon(floor_number, seed, tiles, player_count=1):
             "objective_completed": False,
         }
     return tiles, {}, item_map
-
-
 def build_floor_dungeon(floor_number, seed, player_count=1):
     """Generate a floor with 14 rooms per player plus the floor number."""
     room_count = 14 * max(1, int(player_count)) + floor_number
     tiles = generate_dungeon(max_structures=room_count, seed=seed)
     rng = random.Random(seed + floor_number * 7919)
-    floors = [
-        pos for pos, tile in tiles.items() if tile == FLOOR
-    ]
+    floors = [pos for pos, tile in tiles.items() if tile == FLOOR]
     if not floors:
         return tiles, {}, {}
     ladder_positions = [pos for pos, tile in tiles.items() if tile == LADDER]
@@ -281,8 +291,9 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
         "long": ("Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"),
     }
 
-    strict_pool = [
-        pos for pos in floors
+    terminal_pool = [
+        pos
+        for pos in floors
         if pos not in occupied
         and is_valid_terminal_spot(
             tiles,
@@ -292,7 +303,7 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
         )
     ]
     relaxed_pool = []
-    if not strict_pool:
+    if not terminal_pool:
         relaxed_pool = [
             pos for pos in floors
             if pos not in occupied
@@ -304,13 +315,13 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             )
         ]
     if floor_number > TUTORIAL_FLOOR_MAX and (
-        is_warped_seed(seed, floor_number) or not strict_pool
+        is_warped_seed(seed, floor_number) or not terminal_pool
     ):
         warped_tiles, _, warped_items = build_warped_floor_dungeon(
             floor_number, seed, tiles, player_count
         )
         return warped_tiles, {}, warped_items
-    terminal_pool = strict_pool or relaxed_pool
+    terminal_pool = terminal_pool or relaxed_pool
     if terminal_pool:
         rng.shuffle(terminal_pool)
         for pos in terminal_pool[:terminal_count]:
@@ -338,7 +349,11 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             rng.shuffle(annex_floor)
             terminal_pos = annex_floor[0]
             ladder_pos = annex_floor[1] if len(annex_floor) > 1 else annex_floor[0]
-            items[terminal_pos] = {"item_id": terminal_item_id}
+            items[terminal_pos] = {
+                "item_id": OBJECTIVE_TERMINAL,
+                "objective_game": "Arrow Sequence",
+                "objective_completed": False,
+            }
             tiles[ladder_pos] = LADDER
             occupied.update((terminal_pos, ladder_pos))
         else:
@@ -346,11 +361,8 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
                 f"[dungeon_gen] WARNING: floor {floor_number} seed {seed} "
                 "has no valid terminal spot and annex placement failed."
             )
-
-    scrap_pool = [
-        pos for pos in floors
-        if pos not in occupied and pos not in items
-    ]
+    # --- data scrap ---
+    scrap_pool = [pos for pos in floors if pos not in occupied and pos not in items]
     rng.shuffle(scrap_pool)
     scrap_count = min(5, 2 + floor_number // 2)
     for pos in scrap_pool[:scrap_count]:
@@ -373,27 +385,6 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             "value": loot_value,
         }
     return tiles, {}, items
-
-
-def _infer_door_orientation(dungeon, x, y):
-    horizontal_sides = (
-        dungeon.get((x - 1, y), WALL) != WALL and dungeon.get((x + 1, y), WALL) != WALL
-    )
-    return "V" if horizontal_sides else "H"
-
-
-def materialize_door(dungeon, doors, x, y):
-    """Ensures doors[(x,y)] exists for a DOOR tile, inferring orientation
-    from surrounding geometry for procedurally-generated doors that were
-    never hand-authored with an explicit orientation."""
-    if (x, y) not in doors:
-        doors[(x, y)] = {
-            "orientation": _infer_door_orientation(dungeon, x, y),
-            "animating": False,
-            "anim_until": None,
-            "pending_orientation": None,
-        }
-    return doors[(x, y)]
 
 
 def begin_door_toggle(door, now_ms, anim_ms=DOOR_ANIM_MS):
