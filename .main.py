@@ -96,7 +96,7 @@ ITEM_GLYPHS = {
     DATA_SCRAP: "$",
     ROAMING_SIGNAL: "S",
 }
-TOGGLE_LIGHT_KEY = pygame.BUTTON_LEFT
+TOGGLE_LIGHT_KEY = pygame.K_SPACE
 SHOP_COLOR = (205, 70, 70)
 LADDER_COLOR = (255, 255, 255)
 LOOK_SEND_INTERVAL_MS = (
@@ -259,6 +259,9 @@ def main():
             return "Only light sources can be equipped."
         if character is not None and item_id in character.get("items", []):
             character["equipped_light"] = item_id
+            # Equipping a source starts it in the safe, off state.  This also
+            # prevents the old source's state from carrying over.
+            character["light_on"] = False
             save_json(character, slot_path(character["slot"]))
             return f"Equipped {ITEM_NAMES[item_id]}."
         return "Light source is not in inventory."
@@ -368,6 +371,9 @@ def main():
                 item_id = terminal.active_character["items"].pop(index)
                 drop_pos = find_drop_position(dungeon, items, player_x, player_y)
                 items[drop_pos] = {"item_id": item_id}
+                if item_id == terminal.active_character.get("equipped_light"):
+                    terminal.active_character["equipped_light"] = None
+                    terminal.active_character["light_on"] = False
                 save_json(
                     terminal.active_character,
                     slot_path(terminal.active_character["slot"]),
@@ -431,6 +437,7 @@ def main():
         character["items"].append(item_id)
         if is_light:
             character["equipped_light"] = item_id
+            character["light_on"] = False
         save_json(character, slot_path(character["slot"]))
         return f"Purchased {ITEM_NAMES[item_id]}."
 
@@ -596,7 +603,7 @@ def main():
                     p["look_angle"] = pdata.get("look_angle", 0.0)
 
     def handle_network_message(msg):
-        nonlocal active_seed, dungeon, doors, items, floor_number, objective, shared_bytes
+        nonlocal active_seed, dungeon, doors, items, floor_number, objective, shared_bytes, active_objective_pos
         mtype = msg.get("type")
 
         if mtype == "roster":
@@ -655,11 +662,18 @@ def main():
             objective_pos = msg.get("objective_pos")
             if objective_pos:
                 active_objective_pos = tuple(objective_pos)
-            if remote_objective and remote_objective.get("type") == "roaming" and target:
-                local_position = (
-                    players[local_client_id]["x"],
-                    players[local_client_id]["y"],
-                )
+            if (
+                remote_objective
+                and remote_objective.get("type") == "roaming"
+                and target
+            ):
+                if terminal.network_mode and local_client_id in players:
+                    local_position = (
+                        players[local_client_id]["x"],
+                        players[local_client_id]["y"],
+                    )
+                else:
+                    local_position = (player_x, player_y)
                 terminal.start_signal_tracker(remote_objective, target, local_position)
             elif remote_objective:
                 terminal.open_objective_terminal(remote_objective)
@@ -842,7 +856,13 @@ def main():
                 running = False
             elif terminal.state in TEXT_INPUT_STATES:
                 terminal.handle_input(event)
-            elif terminal.is_modal_game():
+            # Inventory and map are overlays, so movement input must continue
+            # to reach the world while they are open. Interactive architecture
+            # (shop, terminals, etc.) remains modal and consumes input here.
+            elif terminal.is_modal_game() and terminal.state not in (
+                "INVENTORY",
+                "MAP",
+            ):
                 terminal.handle_input(event)
             elif (
                 terminal.signal_tracker
@@ -946,6 +966,7 @@ def main():
                             terminal.active_character["items"].append(item_id)
                             if item_id in LIGHT_ITEM_IDS:
                                 terminal.active_character["equipped_light"] = item_id
+                                terminal.active_character["light_on"] = False
                         terminal.active_character["objective"] = objective
                         save_json(
                             terminal.active_character,
@@ -984,8 +1005,8 @@ def main():
                             door = materialize_door(dungeon, doors, *target_door)
                             begin_door_toggle(door, pygame.time.get_ticks())
             elif (
-                event.type == pygame.MOUSEBUTTONDOWN
-                and event.button == TOGGLE_LIGHT_KEY
+                event.type == pygame.KEYDOWN
+                and event.key == TOGGLE_LIGHT_KEY
                 and terminal.state in ("PLAYING", "INVENTORY", "MAP")
             ):
                 if terminal.network_mode and local_client_id in players:
@@ -1027,11 +1048,11 @@ def main():
             start_host()
 
         # --- movement input ---
-        can_move = not terminal.is_modal_game() and (
+        can_move = terminal.state in ("PLAYING", "INVENTORY", "MAP") and (
             (terminal.active_character and not terminal.network_mode)
             or (terminal.network_mode and local_client_id in players)
         )
-        if can_move and terminal.state == "PLAYING" and time_since_last_move >= 150:
+        if can_move and time_since_last_move >= 150:
             keys = pygame.key.get_pressed()
             candidates = [
                 (pending_moves.get(k, now), k) for k in DIRECTION_KEYS if keys[k]
@@ -1069,11 +1090,11 @@ def main():
                 else:
                     target_x, target_y = player_x + dx, player_y + dy
                     blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                    if (
-                        blocking_item
-                        not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
-                        and is_walkable(dungeon, doors, target_x, target_y, dx, dy)
-                    ):
+                    if blocking_item not in (
+                        OBJECTIVE_TERMINAL,
+                        SHOP_TERMINAL,
+                        ROAMING_SIGNAL,
+                    ) and is_walkable(dungeon, doors, target_x, target_y, dx, dy):
                         player_x, player_y = target_x, target_y
 
                 time_since_last_move = 0
@@ -1154,6 +1175,8 @@ def main():
                         net_server.add_item_to_player(cid, item_id)
                         if item_id in LIGHT_ITEM_IDS:
                             net_server.set_equipped_light(cid, item_id)
+                            with net_server._lock:
+                                net_server.players[cid]["light_on"] = False
             for cid, item_id in net_server.consume_pending_purchases():
                 player_state = net_server.get_players_snapshot().get(cid)
                 if not player_state:
@@ -1234,6 +1257,10 @@ def main():
                     continue
                 item_id = net_server.pop_item_from_player(cid, index)
                 if item_id is not None:
+                    with net_server._lock:
+                        if net_server.players[cid].get("equipped_light") == item_id:
+                            net_server.players[cid]["equipped_light"] = None
+                            net_server.players[cid]["light_on"] = False
                     drop_pos = find_drop_position(dungeon, items, snap["x"], snap["y"])
                     items[drop_pos] = {"item_id": item_id}
             advance_door_animations(doors, pygame.time.get_ticks())
@@ -1243,11 +1270,11 @@ def main():
                     continue
                 target_x, target_y = pdata["x"] + mdx, pdata["y"] + mdy
                 blocking_item = items.get((target_x, target_y), {}).get("item_id")
-                if (
-                    blocking_item
-                    not in (OBJECTIVE_TERMINAL, SHOP_TERMINAL, ROAMING_SIGNAL)
-                    and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy)
-                ):
+                if blocking_item not in (
+                    OBJECTIVE_TERMINAL,
+                    SHOP_TERMINAL,
+                    ROAMING_SIGNAL,
+                ) and is_walkable(dungeon, doors, target_x, target_y, mdx, mdy):
                     net_server.update_player_position(
                         cid, target_x, target_y, pdata["facing"]
                     )
@@ -1335,9 +1362,22 @@ def main():
             else:
                 equipped_light = None
                 light_on = False
+            if equipped_light not in (
+                players[local_client_id].get("items", [])
+                if terminal.network_mode and local_client_id in players
+                else (
+                    terminal.active_character.get("items", [])
+                    if terminal.active_character
+                    else []
+                )
+            ):
+                equipped_light = None
+                light_on = False
             if equipped_light:
                 state = "ON" if light_on else "off"
-                light_line = f"[Left Click] {ITEM_NAMES.get(equipped_light, equipped_light)}: {state}"
+                light_line = (
+                    f"[Space] {ITEM_NAMES.get(equipped_light, equipped_light)}: {state}"
+                )
                 interact_prompt = (
                     f"{interact_prompt}   {light_line}"
                     if interact_prompt
@@ -1351,6 +1391,21 @@ def main():
             equipped_light = terminal.active_character.get("equipped_light")
             light_on = terminal.active_character.get("light_on", False)
         else:
+            equipped_light = None
+            light_on = False
+
+        # A stale equipped_light must never keep the toggle control or its
+        # physical light alive after the item leaves the inventory.
+        owned_lights = (
+            players.get(local_client_id, {}).get("items", [])
+            if terminal.network_mode
+            else (
+                terminal.active_character.get("items", [])
+                if terminal.active_character
+                else []
+            )
+        )
+        if equipped_light not in owned_lights:
             equipped_light = None
             light_on = False
 
