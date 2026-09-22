@@ -171,13 +171,29 @@ def main():
 
     def make_floor_objective(number, floor_items, terminal_pos=None):
         item = floor_items.get(tuple(terminal_pos), {}) if terminal_pos else {}
-        game_name = item.get("objective_game", "Arrow Sequence")
+        # Not every generated terminal carries an objective_game field.  Using
+        # Arrow Sequence as the fallback made every floor present the same
+        # puzzle.  Keep the fallback deterministic so objectives still vary
+        # when older dungeon data is loaded.
+        fallback_games = (
+            "Arrow Sequence",
+            "Number Calibration",
+            "Sine Wave Signal Tuner",
+            "Hotspot Signal Tracker",
+        )
+        game_name = (
+            item.get("objective_game")
+            or fallback_games[(number - 1) % len(fallback_games)]
+        )
         objective_type = (
             "roaming"
             if game_name == "Hotspot Signal Tracker"
-            else "fast"
-            if game_name in ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner")
-            else "long"
+            else (
+                "fast"
+                if game_name
+                in ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner")
+                else "long"
+            )
         )
         target = tuple(terminal_pos) if terminal_pos else None
         required = 1
@@ -440,6 +456,12 @@ def main():
         objective["completed"] = objective["target_progress"] >= objective.get(
             "target_count", 1
         )
+        # The UI uses progress while the objective resolver uses target_progress.
+        # Keep both representations synchronized when the puzzle reports a
+        # successful action.
+        objective["progress"] = min(
+            objective.get("required", 1), objective["target_progress"]
+        )
         if objective["completed"]:
             objective["progress"] = objective["required"]
         if active_objective_pos is not None:
@@ -447,8 +469,6 @@ def main():
             if item and item.get("item_id") in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
                 item["objective_completed"] = True
             active_objective_pos = None
-        text = f"Objective complete: {objective['title']}."
-        terminal.add_system_event(text)
         if terminal.active_character:
             terminal.active_character["objective"] = objective
             save_json(
@@ -457,7 +477,7 @@ def main():
             )
         if net_server:
             net_server.set_world_state(objective=objective)
-        return text
+        return ""
 
     def advance_floor():
         nonlocal active_seed, dungeon, doors, items, player_x, player_y, floor_number, objective, shared_bytes, discovered
@@ -880,16 +900,14 @@ def main():
                             )
                     elif item_id == DATA_SCRAP and terminal.network_mode:
                         net_client.send_pickup(*pos)
-                    elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL) and not items[pos].get(
-                        "objective_completed"
-                    ):
+                    elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL) and not items[
+                        pos
+                    ].get("objective_completed"):
                         if terminal.network_mode:
                             net_client.send_interact(*pos)
                         elif item_id == OBJECTIVE_TERMINAL:
                             active_objective_pos = pos
-                            objective = make_floor_objective(
-                                floor_number, items, pos
-                            )
+                            objective = make_floor_objective(floor_number, items, pos)
                             terminal.open_objective_terminal(objective)
                         elif objective and not objective.get("completed"):
                             candidates = [
@@ -909,9 +927,7 @@ def main():
                                 )
                                 active_objective_pos = pos
                                 terminal.start_signal_tracker(
-                                    make_floor_objective(
-                                        floor_number, items, pos
-                                    ),
+                                    make_floor_objective(floor_number, items, pos),
                                     target,
                                     (player_x, player_y),
                                 )
@@ -1579,9 +1595,11 @@ def main():
                 item = items[(wx, wy)]
                 item_id = item["item_id"]
                 draw_char, is_wall_like, should_stretch = (
-                    OBJECTIVE_COMPLETE_GLYPH
-                    if item.get("objective_completed")
-                    else ITEM_GLYPHS.get(item_id, ITEM_GLYPH),
+                    (
+                        OBJECTIVE_COMPLETE_GLYPH
+                        if item.get("objective_completed")
+                        else ITEM_GLYPHS.get(item_id, ITEM_GLYPH)
+                    ),
                     False,
                     False,
                 )
@@ -1642,13 +1660,21 @@ def main():
                         OBJECTIVE_COMPLETE_COLOR
                         if (wx, wy) in items
                         and items[(wx, wy)].get("objective_completed")
-                        else OBJECTIVE_COLOR
-                        if (wx, wy) in items
-                        and items[(wx, wy)]["item_id"]
-                        in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
-                        else ITEM_COLOR
-                        if (wx, wy) in items
-                        else WALL_COLOR if is_wall_like or char == DOOR else FLOOR_COLOR
+                        else (
+                            OBJECTIVE_COLOR
+                            if (wx, wy) in items
+                            and items[(wx, wy)]["item_id"]
+                            in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
+                            else (
+                                ITEM_COLOR
+                                if (wx, wy) in items
+                                else (
+                                    WALL_COLOR
+                                    if is_wall_like or char == DOOR
+                                    else FLOOR_COLOR
+                                )
+                            )
+                        )
                     )
                 color = tuple(int(c * brightness) for c in base_tile_color)
                 cx = offset_x + (wx - camera_start_x) * cell_spacing_x

@@ -164,11 +164,7 @@ def is_warped_seed(seed, floor_number):
     """Stable hidden omen: later floors can become warped without altering the seed."""
     if floor_number < WARPED_FLOOR_MIN_NUMBER:
         return False
-    omen_seed = (
-        (seed * 0x9E3779B1)
-        ^ (floor_number * 0x85EBCA77)
-        ^ 0xA61A7E
-    )
+    omen_seed = (seed * 0x9E3779B1) ^ (floor_number * 0x85EBCA77) ^ 0xA61A7E
     omen_rng = random.Random(omen_seed)
     return omen_rng.randrange(100) < WARPED_FLOOR_CHANCE_PERCENT
 
@@ -204,8 +200,14 @@ def build_agnate_annex(tiles, rng, attempts=ANNEX_ATTACH_ATTEMPTS):
             tiles[pos] = FLOOR
         for x, y in blob_positions:
             for dx, dy in (
-                (1, 0), (-1, 0), (0, 1), (0, -1),
-                (1, 1), (1, -1), (-1, 1), (-1, -1),
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
             ):
                 npos = (x + dx, y + dy)
                 if npos not in blob_positions and tiles.get(npos) != FLOOR:
@@ -237,7 +239,7 @@ def build_warped_floor_dungeon(floor_number, seed, tiles, player_count=1):
         lobe_r = rng.randint(7, 11)
         for x in range(lobe_cx - lobe_r, lobe_cx + lobe_r + 1):
             for y in range(lobe_cy - lobe_r, lobe_cy + lobe_r + 1):
-                if (x - lobe_cx) ** 2 + (y - lobe_cy) ** 2 <= lobe_r ** 2:
+                if (x - lobe_cx) ** 2 + (y - lobe_cy) ** 2 <= lobe_r**2:
                     blob_positions.add((x, y))
 
     if not blob_positions:
@@ -247,8 +249,14 @@ def build_warped_floor_dungeon(floor_number, seed, tiles, player_count=1):
         tiles[pos] = FLOOR
     for x, y in blob_positions:
         for dx, dy in (
-            (1, 0), (-1, 0), (0, 1), (0, -1),
-            (1, 1), (1, -1), (-1, 1), (-1, -1),
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
         ):
             npos = (x + dx, y + dy)
             if npos not in blob_positions and tiles.get(npos) != FLOOR:
@@ -272,6 +280,8 @@ def build_warped_floor_dungeon(floor_number, seed, tiles, player_count=1):
             "objective_completed": False,
         }
     return tiles, {}, item_map
+
+
 def build_floor_dungeon(floor_number, seed, player_count=1):
     """Generate a floor with 14 rooms per player plus the floor number."""
     room_count = 14 * max(1, int(player_count)) + floor_number
@@ -288,7 +298,7 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     hotspot_spawned = False
     terminal_games = {
         "fast": ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"),
-        "long": ("Flow Puzzle", "Memory Pattern / Simon", "Active Hold / Pong"),
+        "long": ("Memory Pattern / Simon"),
     }
 
     terminal_pool = [
@@ -305,7 +315,8 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     relaxed_pool = []
     if not terminal_pool:
         relaxed_pool = [
-            pos for pos in floors
+            pos
+            for pos in floors
             if pos not in occupied
             and is_valid_terminal_spot(
                 tiles,
@@ -389,8 +400,7 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
 
 def _infer_door_orientation(dungeon, x, y):
     horizontal_sides = (
-        dungeon.get((x - 1, y), WALL) != WALL
-        and dungeon.get((x + 1, y), WALL) != WALL
+        dungeon.get((x - 1, y), WALL) != WALL and dungeon.get((x + 1, y), WALL) != WALL
     )
     return "V" if horizontal_sides else "H"
 
@@ -466,7 +476,8 @@ def vision_blocking_dungeon(dungeon, doors):
     return merged
 
 
-seed_rng = random.Random(min(0, 2**32 - 1))  # For reproducible dungeon generation
+seed = random.randint(0, 2**32 - 1)
+seed_rng = random.Random(seed)
 
 
 class Rect:
