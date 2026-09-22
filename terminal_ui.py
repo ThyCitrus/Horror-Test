@@ -1683,6 +1683,15 @@ class TerminalUI:
                     ),
                     (rect.x + 30, y),
                 )
+            elif completed:
+                surface.blit(
+                    self.bold_font.render(
+                        game.get("flavor_text", "MEMORY BUFFER FLUSHED."),
+                        True,
+                        (100, 255, 140),
+                    ),
+                    (rect.x + 20, y),
+                )
             else:
                 surface.blit(
                     self.font.render(
@@ -1723,6 +1732,14 @@ class TerminalUI:
                     self.bold_font.render("ROUND COMPLETE!", True, (100, 255, 120)),
                     (rect.x + 30, y),
                 )
+        if completed and kind != "simon":
+            y += line_height
+            surface.blit(
+                self.bold_font.render(
+                    game.get("flavor_text", "TASK COMPLETE."), True, (100, 255, 140)
+                ),
+                (rect.x + 20, y),
+            )
         y += line_height + 8
         surface.blit(
             self.font.render(
