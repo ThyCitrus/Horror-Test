@@ -314,6 +314,19 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
                 min_floor_neighbors=TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS,
             )
         ]
+    if GENERATION_DEBUG:
+        _log_generation_debug(
+            seed,
+            phase=f"floor_{floor_number}_terminals",
+            strict=len(terminal_pool),
+            relaxed=len(relaxed_pool),
+        )
+        if not terminal_pool and relaxed_pool:
+            _log_generation_debug(
+                seed,
+                phase=f"floor_{floor_number}_relaxed_fallback",
+                fallback_count=len(relaxed_pool),
+            )
     if floor_number > TUTORIAL_FLOOR_MAX and (
         is_warped_seed(seed, floor_number) or not terminal_pool
     ):
@@ -466,7 +479,18 @@ def vision_blocking_dungeon(dungeon, doors):
     return merged
 
 
-seed_rng = random.Random(min(0, 2**32 - 1))  # For reproducible dungeon generation
+# ---------------------------------------------------------------------------
+# DEBUG / SEED REPLAY REGION
+# ---------------------------------------------------------------------------
+GENERATION_DEBUG = False
+seed_rng = random.Random()
+
+
+def _log_generation_debug(seed, *, phase, **details):
+    if not GENERATION_DEBUG:
+        return
+    summary = ", ".join(f"{key}={value}" for key, value in details.items())
+    print(f"[generation:{phase}] seed={seed}{' | ' + summary if summary else ''}")
 
 
 class Rect:
@@ -527,12 +551,12 @@ def carve_ring(tiles, cx, cy, outer_radius, inner_radius):
 # =====================================================================
 
 
-def try_build_room(attach_point, tiles, placed_rects, structures):
+def try_build_room(attach_point, tiles, placed_rects, structures, rng):
     dx, dy = attach_point["dir"]
     max_dim, min_dim = 16, 6
 
-    w = random.randint(min_dim, max_dim)
-    h = random.randint(min_dim, max_dim)
+    w = rng.randint(min_dim, max_dim)
+    h = rng.randint(min_dim, max_dim)
 
     if dx == 1:
         x1, y1 = attach_point["x"] + 1, attach_point["y"] - h // 2
@@ -555,9 +579,9 @@ def try_build_room(attach_point, tiles, placed_rects, structures):
     return info
 
 
-def try_build_hallway(attach_point, tiles, placed_rects, structures):
+def try_build_hallway(attach_point, tiles, placed_rects, structures, rng):
     dx, dy = attach_point["dir"]
-    length = random.randint(8, 16)
+    length = rng.randint(8, 16)
     total_width = 5
 
     if dx != 0:
@@ -590,9 +614,9 @@ def try_build_hallway(attach_point, tiles, placed_rects, structures):
     return info
 
 
-def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
+def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures, rng):
     dx, dy = attach_point["dir"]
-    leg1 = random.randint(6, 12)
+    leg1 = rng.randint(6, 12)
     total_width = 5
 
     if dx != 0:
@@ -601,7 +625,7 @@ def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
         w1, h1 = leg1, total_width
         elbow_x = x1 + w1 - 1 if dx == 1 else x1
         elbow_y = attach_point["y"]
-        turn_dy = random.choice([-1, 1])
+        turn_dy = rng.choice([-1, 1])
         turn_dir = (0, turn_dy)
     else:
         y1 = attach_point["y"] + 1 if dy == 1 else attach_point["y"] - leg1
@@ -609,14 +633,14 @@ def try_build_elbow_hallway(attach_point, tiles, placed_rects, structures):
         w1, h1 = total_width, leg1
         elbow_x = attach_point["x"]
         elbow_y = y1 + h1 - 1 if dy == 1 else y1
-        turn_dx = random.choice([-1, 1])
+        turn_dx = rng.choice([-1, 1])
         turn_dir = (turn_dx, 0)
 
     leg1_rect = Rect(x1, y1, x1 + w1 - 1, y1 + h1 - 1)
     if any(leg1_rect.overlaps(r) for r in placed_rects):
         return False
 
-    leg2 = random.randint(6, 12)
+    leg2 = rng.randint(6, 12)
     tdx, tdy = turn_dir
     if tdx != 0:
         x2 = elbow_x + 1 if tdx == 1 else elbow_x - leg2
@@ -772,7 +796,7 @@ def try_build_pillar_room(attach_point, tiles, placed_rects, structures):
     return info
 
 
-def queue_attachment_points(structure, attach_queue):
+def queue_attachment_points(structure, attach_queue, rng):
     rect = structure["rect"]
     x1, y1, x2, y2 = rect.x1, rect.y1, rect.x2, rect.y2
 
@@ -795,13 +819,13 @@ def queue_attachment_points(structure, attach_queue):
 
     sides = [("N", (0, -1)), ("S", (0, 1)), ("E", (1, 0)), ("W", (-1, 0))]
     for side_name, (dx, dy) in sides:
-        num_points = random.randint(1, 2)
+        num_points = rng.randint(1, 2)
         for _ in range(num_points):
             if side_name in ("N", "S"):
-                ax = random.randint(x1 + 2, x2 - 2)
+                ax = rng.randint(x1 + 2, x2 - 2)
                 ay = y1 if side_name == "N" else y2
             else:
-                ay = random.randint(y1 + 2, y2 - 2)
+                ay = rng.randint(y1 + 2, y2 - 2)
                 ax = x1 if side_name == "W" else x2
             attach_queue.append({"x": ax, "y": ay, "dir": (dx, dy)})
 
@@ -811,7 +835,7 @@ def queue_attachment_points(structure, attach_queue):
 # =====================================================================
 
 
-def carve_matched_doors_pass(tiles, structures):
+def carve_matched_doors_pass(tiles, structures, rng):
     """Evaluates adjacent structures and cuts matched grid connections."""
     for i in range(len(structures)):
         s1 = structures[i]
@@ -824,10 +848,10 @@ def carve_matched_doors_pass(tiles, structures):
             if not r1.overlaps(r2, buffer=1):
                 continue
 
-            connect_adjacent_structures(tiles, s1, s2)
+            connect_adjacent_structures(tiles, s1, s2, rng)
 
 
-def connect_adjacent_structures(tiles, s1, s2):
+def connect_adjacent_structures(tiles, s1, s2, rng):
     """Punches a connection, optionally putting a door in its one-wide hall."""
     r1, r2 = s1["rect"], s2["rect"]
     shared_walls = []
@@ -877,10 +901,10 @@ def connect_adjacent_structures(tiles, s1, s2):
     # Doors belong only at room-type boundaries, and only in a one-tile-wide
     # corridor (for example, #.#).  Keep this chance here so each connection
     # is evaluated independently.
-    if s1["type"] != s2["type"] and random.random() < 0.50:
+    if s1["type"] != s2["type"] and rng.random() < 0.50:
         candidates = [pos for pos in carved if is_one_wide_corridor(tiles, *pos)]
         if candidates:
-            x, y = random.choice(candidates)
+            x, y = rng.choice(candidates)
             tiles[(x, y)] = DOOR
 
 
@@ -965,14 +989,20 @@ def enclose_dungeon_walls(tiles):
 # =====================================================================
 
 
-def generate_dungeon(max_structures=15, seed=None):
-    if seed is not None:
-        random.seed(seed)
+def generate_dungeon(max_structures=15, seed=None, debug=None):
+    if seed is None:
+        seed = seed_rng.randint(0, 2**32 - 1)
+    rng = random.Random(seed)
+
+    if debug is None:
+        debug = GENERATION_DEBUG
+    if debug:
+        _log_generation_debug(seed, phase="start", max_structures=max_structures)
 
     tiles, placed_rects, attach_queue, structures = {}, [], [], []
 
     # Initial anchor room
-    w, h = random.randint(6, 12), random.randint(6, 12)
+    w, h = rng.randint(6, 12), rng.randint(6, 12)
     x1, y1 = -w // 2, -h // 2
     carve_rect(tiles, x1, y1, w, h)
     anchor_rect = Rect(x1, y1, x1 + w - 1, y1 + h - 1)
@@ -987,7 +1017,7 @@ def generate_dungeon(max_structures=15, seed=None):
         "rect": anchor_rect,
     }
     structures.append(anchor_info)
-    queue_attachment_points(anchor_info, attach_queue)
+    queue_attachment_points(anchor_info, attach_queue, rng)
 
     placed_count = 1
     attempts = 0
@@ -999,16 +1029,16 @@ def generate_dungeon(max_structures=15, seed=None):
         attempts += 1
         attach_point = attach_queue.pop(0)
 
-        roll = random.random()
+        roll = rng.random()
         info = False
 
         if roll < 0.35:
-            info = try_build_room(attach_point, tiles, placed_rects, structures)
+            info = try_build_room(attach_point, tiles, placed_rects, structures, rng)
         elif roll < 0.55:
-            info = try_build_hallway(attach_point, tiles, placed_rects, structures)
+            info = try_build_hallway(attach_point, tiles, placed_rects, structures, rng)
         elif roll < 0.65:
             info = try_build_elbow_hallway(
-                attach_point, tiles, placed_rects, structures
+                attach_point, tiles, placed_rects, structures, rng
             )
         elif roll < 0.75:
             info = try_build_circular_room(
@@ -1016,7 +1046,7 @@ def generate_dungeon(max_structures=15, seed=None):
                 tiles,
                 placed_rects,
                 structures,
-                radius=random.choice([7, 15]),
+                radius=rng.choice([7, 15]),
             )
         elif roll < 0.85:
             info = try_build_ring_room(attach_point, tiles, placed_rects, structures)
@@ -1026,15 +1056,20 @@ def generate_dungeon(max_structures=15, seed=None):
         if info:
             placed_count += 1
             last_info = info
-            queue_attachment_points(info, attach_queue)
+            queue_attachment_points(info, attach_queue, rng)
+
+    if debug:
+        _log_generation_debug(seed, phase="layout", structures=placed_count, tiles=len(tiles))
 
     # PASS 2: Carve matched doors and connections between adjacent layout geometry
-    carve_matched_doors_pass(tiles, structures)
+    carve_matched_doors_pass(tiles, structures, rng)
 
     # PASS 3: Enclose exposed outer floor edges
     enclose_dungeon_walls(tiles)
 
     place_ladders(tiles, last_info)
+    if debug:
+        _log_generation_debug(seed, phase="complete", tiles=len(tiles), structures=len(structures))
     return tiles
 
 
@@ -1298,7 +1333,6 @@ def print_dungeon(tiles):
 
 
 if __name__ == "__main__":
-    seed = random.randint(0, 2**32 - 1)
-    dungeon = generate_dungeon(max_structures=60, seed=seed)
-    print(f"Seed: {seed}")
+    seed = seed_rng.randint(0, 2**32 - 1)
+    dungeon = generate_dungeon(max_structures=60, seed=seed, debug=True)
     print_dungeon(dungeon)
