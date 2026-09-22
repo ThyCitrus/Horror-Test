@@ -490,7 +490,7 @@ def vision_blocking_dungeon(dungeon, doors):
 
 
 # ---------------------------------------------------------------------------
-# DEBUG / SEED REPLAY REGION
+# region DEBUG / SEED REPLAY
 # ---------------------------------------------------------------------------
 GENERATION_DEBUG = False
 seed_rng = random.Random()
@@ -501,6 +501,9 @@ def _log_generation_debug(seed, *, phase, **details):
         return
     summary = ", ".join(f"{key}={value}" for key, value in details.items())
     print(f"[generation:{phase}] seed={seed}{' | ' + summary if summary else ''}")
+
+
+# endregion
 
 
 class Rect:
