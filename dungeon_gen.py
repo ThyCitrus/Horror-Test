@@ -27,7 +27,7 @@ WARPED_FLOOR_MIN_NUMBER = 6
 WARPED_FLOOR_CHANCE_PERCENT = 3
 WARPED_STRUCTURE_MULTIPLIER = 2
 WARPED_BUILD_ATTEMPTS = 10
-TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS = 5
+TERMINAL_STRICT_MIN_WALL_NEIGHBORS = 3
 TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS = 7
 ANNEX_ATTACH_ATTEMPTS = 10
 AGNATE_ANNEX_MARKER = "AgnateAnnexSpawn"
@@ -142,7 +142,7 @@ def is_valid_terminal_spot(
     x,
     y,
     require_wall=True,
-    min_floor_neighbors=TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS,
+    min_wall_neighbors=TERMINAL_STRICT_MIN_WALL_NEIGHBORS,
 ):
     """Return whether a floor tile is safe and suitable for a terminal."""
     if tiles.get((x, y)) != FLOOR:
@@ -155,7 +155,7 @@ def is_valid_terminal_spot(
     ]
     if any(tiles.get(pos) == DOOR for pos in neighbors8):
         return False
-    if sum(tiles.get(pos) == FLOOR for pos in neighbors8) < min_floor_neighbors:
+    if sum(tiles.get(pos) == FLOOR for pos in neighbors8) < min_wall_neighbors:
         return False
     return not require_wall or any(tiles.get(pos) == WALL for pos in neighbors8)
 
@@ -297,8 +297,12 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     terminal_count = max(1, math.ceil(room_count / 10))
     hotspot_spawned = False
     terminal_games = {
-        "fast": ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner"),
-        "long": ("Memory Pattern / Simon"),
+        "fast": (
+            "Arrow Sequence",
+            "Number Calibration",
+            "Sine Wave Signal Tuner",
+        ),
+        "long": ("Memory Pattern / Simon",),
     }
 
     terminal_pool = [
@@ -309,7 +313,7 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             tiles,
             *pos,
             require_wall=True,
-            min_floor_neighbors=TERMINAL_STRICT_MIN_FLOOR_NEIGHBORS,
+            min_wall_neighbors=TERMINAL_STRICT_MIN_WALL_NEIGHBORS,
         )
     ]
     relaxed_pool = []
@@ -348,7 +352,19 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     terminal_pool = terminal_pool or relaxed_pool
     if terminal_pool:
         rng.shuffle(terminal_pool)
-        for pos in terminal_pool[:terminal_count]:
+        spawned_terminal_positions = []
+        terminal_index = 0
+        for pos in terminal_pool:
+            # Leave a two-tile gap between objective terminals.  This avoids
+            # nearby terminals competing for the same interaction/state flow.
+            if any(
+                max(abs(pos[0] - other[0]), abs(pos[1] - other[1])) < 3
+                for other in spawned_terminal_positions
+            ):
+                continue
+            existing_item = items.get(pos)
+            if existing_item and existing_item.get("item_id") == OBJECTIVE_TERMINAL:
+                continue
             roll = rng.random()
             if roll < 0.10 and not hotspot_spawned:
                 item_id = ROAMING_SIGNAL
@@ -365,7 +381,15 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
                 "objective_game": game,
                 "objective_completed": False,
             }
+            if item_id == OBJECTIVE_TERMINAL:
+                items[pos][
+                    "terminal_id"
+                ] = f"objective-{floor_number}-{seed}-{terminal_index}"
+                terminal_index += 1
+                spawned_terminal_positions.append(pos)
             occupied.add(pos)
+            if len(spawned_terminal_positions) >= terminal_count:
+                break
     else:
         blob = build_agnate_annex(tiles, rng)
         if blob:
@@ -492,7 +516,7 @@ def vision_blocking_dungeon(dungeon, doors):
 # ---------------------------------------------------------------------------
 # region DEBUG / SEED REPLAY
 # ---------------------------------------------------------------------------
-GENERATION_DEBUG = False
+GENERATION_DEBUG = True
 seed_rng = random.Random()
 
 

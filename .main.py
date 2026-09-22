@@ -171,20 +171,22 @@ def main():
 
     def make_floor_objective(number, floor_items, terminal_pos=None):
         item = floor_items.get(tuple(terminal_pos), {}) if terminal_pos else {}
-        # Not every generated terminal carries an objective_game field.  Using
-        # Arrow Sequence as the fallback made every floor present the same
-        # puzzle.  Keep the fallback deterministic so objectives still vary
-        # when older dungeon data is loaded.
-        fallback_games = (
+        game_name = item.get("objective_game")
+        if not game_name:
+            raise ValueError(f"Terminal at {terminal_pos} has no objective game")
+        supported_games = {
             "Arrow Sequence",
             "Number Calibration",
             "Sine Wave Signal Tuner",
+            "Flow Puzzle",
+            "Memory Pattern / Simon",
+            "Active Hold / Pong",
             "Hotspot Signal Tracker",
-        )
-        game_name = (
-            item.get("objective_game")
-            or fallback_games[(number - 1) % len(fallback_games)]
-        )
+        }
+        if game_name not in supported_games:
+            raise ValueError(
+                f"Unsupported objective game {game_name!r} at {terminal_pos}"
+            )
         objective_type = (
             "roaming"
             if game_name == "Hotspot Signal Tracker"
@@ -210,6 +212,16 @@ def main():
             "completed": bool(item.get("objective_completed")),
             "terminal_prompt": f"{game_name.upper()} // EXECUTE",
         }
+
+    def objectives_complete():
+        objective_items = [
+            item
+            for item in items.values()
+            if item.get("item_id") in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
+        ]
+        return bool(objective_items) and all(
+            item.get("objective_completed") for item in objective_items
+        )
 
     def get_player_count():
         if net_server is not None:
@@ -555,6 +567,10 @@ def main():
         on_equip_item=equip_item,
         on_deposit_loot=deposit_loot,
     )
+    # Keep the concrete terminal instance receiving input.  This is deliberately
+    # a reference, rather than a separate ``in_terminal`` flag, so a terminal
+    # screen cannot accidentally keep using another terminal's input buffer.
+    active_terminal = terminal
 
     def sync_players_from_state(state_players):
         for cid, pdata in state_players.items():
@@ -844,7 +860,7 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
             elif terminal.state in TEXT_INPUT_STATES:
-                terminal.handle_input(event)
+                active_terminal.handle_input(event)
             # Inventory and map are overlays, so movement input must continue
             # to reach the world while they are open. Interactive architecture
             # (shop, terminals, etc.) remains modal and consumes input here.
@@ -852,13 +868,15 @@ def main():
                 "INVENTORY",
                 "MAP",
             ):
-                terminal.handle_input(event)
+                if active_terminal is not None:
+                    active_terminal.handle_input(event)
             elif (
                 terminal.signal_tracker
                 and event.type == pygame.KEYDOWN
                 and event.key in (pygame.K_ESCAPE, pygame.K_q)
             ):
-                terminal.handle_input(event)
+                if active_terminal is not None:
+                    active_terminal.handle_input(event)
             elif event.type == pygame.KEYDOWN and event.key in DIRECTION_KEYS:
                 pending_moves[event.key] = now
                 buffered_move = event.key
@@ -967,11 +985,9 @@ def main():
                             slot_path(terminal.active_character["slot"]),
                         )
                 elif pos in dungeon and dungeon[pos] == LADDER:
-                    if active_seed != SHOP_SEED and (
-                        not objective or not objective.get("completed")
-                    ):
+                    if active_seed != SHOP_SEED and not objectives_complete():
                         terminal.set_transient(
-                            "Ladder locked: complete the objective first.",
+                            "Ladder locked: complete every terminal objective.",
                             (255, 180, 80),
                             duration_ms=1600,
                         )
@@ -1245,8 +1261,14 @@ def main():
                     and ladder
                     and abs(pdata["x"] - ladder[0]) + abs(pdata["y"] - ladder[1]) <= 1
                 ):
-                    advance_floor()
-                    descended = True
+                    if objectives_complete():
+                        advance_floor()
+                        descended = True
+                    else:
+                        net_server.send_purchase_result(
+                            cid,
+                            "Ladder locked: complete every terminal objective.",
+                        )
             net_server.set_world_state(
                 floor_number=floor_number,
                 shared_bytes=shared_bytes,

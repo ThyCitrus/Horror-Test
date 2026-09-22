@@ -126,6 +126,10 @@ class TerminalUI:
         self.objective_game = None
         self.signal_tracker = None
         self._objective_callback_called = False
+        # The concrete terminal currently being interacted with.  This is
+        # intentionally separate from the UI state so multiple terminals do
+        # not share an input buffer.
+        self.active_terminal = None
 
         self.load_start_menu()
 
@@ -367,16 +371,17 @@ class TerminalUI:
 
     def open_objective_terminal(self, objective):
         """Start the objective's self-contained puzzle."""
+        self.active_terminal = self
         self.objective = objective
         self.state = "TERMINAL_GAME"
         self._objective_callback_called = False
         self._start_objective_game(objective)
 
     def _start_objective_game(self, objective):
-        game = objective.get("game", "Arrow Sequence")
-        # Each selection should generate a fresh puzzle, even for the same
-        # objective and terminal.
-        rng = random.SystemRandom()
+        game = objective.get("game")
+        if not game:
+            raise ValueError("Objective is missing its game name")
+        rng = random.Random(objective.get("id", game))
         arrows = [pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT]
         if game == "Arrow Sequence":
             # Five arrows on floor one and ten on floor five, increasing
@@ -431,7 +436,7 @@ class TerminalUI:
                 "feedback_until": 0,
             }
         else:
-            self.objective_game = {"kind": "arrows", "sequence": arrows, "index": 0}
+            raise ValueError(f"Unsupported objective game: {game!r}")
         self.set_options([])
 
     def is_modal_game(self):
@@ -698,7 +703,25 @@ class TerminalUI:
 
     # --- input handling ---
 
+    def bind_active_terminal(self, terminal):
+        """Bind input to the specific terminal the player opened."""
+        self.active_terminal = terminal
+
+    def clear_active_terminal(self, terminal=None):
+        """Clear a terminal binding when interaction ends."""
+        if terminal is None or terminal is self.active_terminal:
+            self.active_terminal = None
+
     def handle_input(self, event):
+        # Forward events before handling local state.  The guard prevents a
+        # terminal bound to this UI from recursively forwarding to itself.
+        terminal = self.active_terminal
+        if terminal is not None and terminal is not self:
+            handler = getattr(terminal, "handle_input", None)
+            if handler is not None:
+                handler(event)
+            return
+
         # 1. Passive states main.py will transition us out of — nothing to do
         if self.state in ("CONNECTING", "JOINING"):
             return
@@ -1568,9 +1591,7 @@ class TerminalUI:
                 (rect.x + 20, y),
             )
             y += line_height
-            graph = pygame.Rect(
-                rect.x + 30, y + 4, max(240, rect.width - 60), 170
-            )
+            graph = pygame.Rect(rect.x + 30, y + 4, max(240, rect.width - 60), 170)
             pygame.draw.rect(surface, (10, 20, 20), graph)
             pygame.draw.rect(surface, PANEL_DIVIDER, graph, 1)
             self._draw_wave(
