@@ -177,7 +177,9 @@ class GameServer:
                             self.pending_descends.append(client_id)
                     elif mtype == "purchase" and client_id:
                         with self._lock:
-                            self.pending_purchases.append((client_id, msg.get("item_id")))
+                            self.pending_purchases.append(
+                                (client_id, msg.get("item_id"))
+                            )
                     elif mtype == "deposit" and client_id:
                         with self._lock:
                             self.pending_deposits.append(client_id)
@@ -385,7 +387,9 @@ class GameServer:
             if player and player.get("socket"):
                 player["socket"].send({"type": "purchase_result", "message": message})
 
-    def send_objective_start(self, client_id, objective, target=None, objective_pos=None):
+    def send_objective_start(
+        self, client_id, objective, target=None, objective_pos=None
+    ):
         with self._lock:
             player = self.players.get(client_id)
             if player and player.get("socket"):
@@ -430,6 +434,7 @@ class GameServer:
         shared_bytes=None,
         objective=_UNSET,
         player_count=None,
+        ladder_open=_UNSET,
     ):
         with self._lock:
             if floor_number is not None:
@@ -440,6 +445,8 @@ class GameServer:
                 self.objective = objective
             if player_count is not None:
                 self.player_count = max(1, int(player_count))
+            if ladder_open is not _UNSET:
+                self.ladder_open = ladder_open
 
     def add_shared_bytes(self, amount):
         with self._lock:

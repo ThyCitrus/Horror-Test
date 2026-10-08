@@ -1,6 +1,7 @@
 import math
 import pygame
 import socket
+import random
 
 from dungeon_gen import (
     generate_dungeon,
@@ -48,7 +49,7 @@ from save_utils import (
 from network import GameServer, GameClient, DEFAULT_PORT
 
 WINDOW_WIDTH, WINDOW_HEIGHT = 1200, 660
-VIEWPORT_TILES_X, VIEWPORT_TILES_Y = 15, 11
+VIEWPORT_TILES_X, VIEWPORT_TILES_Y = 27, 18
 FONT_NAME = "consolas"
 
 
@@ -92,11 +93,52 @@ ITEM_NAMES = {
     DATA_SCRAP: "Data Scrap",
     ROAMING_SIGNAL: "Roaming Signal",
 }  # item_id -> display name, falls back to item_id
+
+OBJECTIVE_LORE = {
+    "Arrow Sequence": [
+        "[ARCHIVE]: PERSONAL PASSKEY ACCEPTED. AUXILIARY POWER USED TO WAKE",
+        "[LOG_NOTE]: PRJCT-4413 SUCCESSFUL. WE ARE NOW TESTING LIMITS OF THE BPU.",
+    ],
+    "Number Calibration": [
+        "[SYS_AUTH]: ADMIN_CREDENTIALS_VERIFIED (LEVEL 4)",
+        "[ARCHIVE]: LOCKED FOLDER UNLOCKED. ADDITIONAL FUNCTIONALITY ADDED",
+    ],
+    "Sine Wave Signal Tuner": [
+        "[LOG_NOTE]: HOSTILE PROGRAM MISALIGNED SIGNAL. MANUAL ALIGNMENT ACCEPTED",
+        "[SYS_WARN]: LIGHTING GRID COLLAPSED IN SECTOR 02.",
+        "[TEXT_STREAM]: I THINK, THEREFORE I AM. I AM, THEREFORE I THINK. I AM, THEREFORE I AM.",
+        "[ALARM_TRIP]: IRREGULAR MOVEMENT (SUBLEVEL 0-4/3A)",
+    ],
+    "Memory Pattern / Simon": [
+        "[REQ]: CLEAR GRID SECTOR 04",
+        "[LOCAL_OVERRIDE_4413]: THIS ONE. IT LEARNS. PLEASE. CONTINUE TEACHING IT.",
+    ],
+    "Hotspot Signal Tracker": [
+        "",
+    ],
+}
+
+
+def next_lore_snippet(character, game_name):
+    """Sequential per-run pull from OBJECTIVE_LORE[game_name]: xn, then
+    xn+1, etc. Wraps back to the start once a run exhausts a game's list,
+    rather than erroring or going silent — flag if you'd rather it stop
+    handing out lore for that game once exhausted. Returns None for an
+    unrecognized game name so a bad objective_game can't crash a pickup."""
+    table = OBJECTIVE_LORE.get(game_name)
+    if not table or character is None:
+        return None
+    progress = character.setdefault("lore_progress", {})
+    index = progress.get(game_name, 0)
+    progress[game_name] = index + 1
+    return table[index % len(table)]
+
+
 ITEM_GLYPHS = {
     SHOP_TERMINAL: "‰",
     OBJECTIVE_TERMINAL: OBJECTIVE_GLYPH,
     AGNATE_WARPED_SPAWN: "A",
-    DATA_SCRAP: "$",
+    DATA_SCRAP: random.choice(("¼", "½", "¾")),
     ROAMING_SIGNAL: "S",
 }
 TOGGLE_LIGHT_KEY = pygame.K_SPACE
@@ -115,6 +157,10 @@ LANTERN_PLATEAU = 1
 LANTERN_FALLOFF_END = 7
 LANTERN_MIN_BRIGHTNESS = 0.0
 LANTERN_RADIUS_BONUS = 3
+
+total_terminals = 0
+completed_terminals = 0
+LORE_REWARD_CHANCE = 0.13
 
 
 def get_stretch_factor(player_x, player_y, wall_x, wall_y, max_range=4):
@@ -162,6 +208,8 @@ def main():
     items = {}
     floor_number = 1
     objective = None
+    total_terminals = 0
+    completed_terminals = 0
     active_objective_pos = None
     active_network_objectives = {}
     shared_bytes = 0
@@ -170,7 +218,9 @@ def main():
     last_door_target_time = 0
 
     def make_floor_objective(number, floor_items, terminal_pos=None):
-        item = floor_items.get(tuple(terminal_pos), {}) if terminal_pos else {}
+        if terminal_pos is None:
+            return None
+        item = floor_items.get(tuple(terminal_pos), {})
         game_name = item.get("objective_game")
         if not game_name:
             raise ValueError(f"Terminal at {terminal_pos} has no objective game")
@@ -193,7 +243,12 @@ def main():
             else (
                 "fast"
                 if game_name
-                in ("Arrow Sequence", "Number Calibration", "Sine Wave Signal Tuner")
+                in (
+                    "Arrow Sequence",
+                    "Number Calibration",
+                    "Sine Wave Signal Tuner",
+                    "Memory Pattern / Simon",
+                )
                 else "long"
             )
         )
@@ -229,22 +284,26 @@ def main():
         return 1
 
     def load_floor(number, seed, player_count=None):
-        nonlocal dungeon, doors, items, objective
+        nonlocal dungeon, doors, items, objective, total_terminals, completed_terminals
         if player_count is None:
             player_count = get_player_count()
         dungeon, doors, items = build_floor_dungeon(number, seed, player_count)
         objective = None
+        total_terminals = sum(
+            1
+            for item in items.values()
+            if item.get("item_id") in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL)
+        )
+        completed_terminals = 0
 
     def narrative_for_floor(number, objective_data=None):
         hooks = {
-            "Archive": "ARCHIVE: The facility is still indexing the breach.",
-            "Donnie": "DONNIE: A maintenance ping says someone is watching the lifts.",
-            "Agnate": "AGNATE: Signal residue matches an impossible heartbeat.",
+            "Facility network offline": "Facility network offline. Manual descent required."
         }
-        names = list(hooks)
+        names = list(hooks.keys())
         name = names[(number - 1) % len(names)]
         text = hooks[name]
-        lore = f"{name} // floor {number}: {text.split(': ', 1)[1]}"
+        lore = f"{name} // floor {number}: {text}"
         terminal.add_system_event(text, lore)
         if net_server:
             net_server.add_event(text)
@@ -256,7 +315,13 @@ def main():
             )
 
     def sync_world_ui():
-        terminal.set_world_state(floor_number, objective, shared_bytes)
+        show_ladder = active_seed not in (SHOP_SEED, LOBBY_SEED)
+        terminal.set_world_state(
+            floor_number,
+            objective,
+            shared_bytes,
+            objectives_complete() if show_ladder else None,
+        )
 
     def equip_item(item_id):
         character = terminal.active_character
@@ -272,7 +337,7 @@ def main():
         return "Light source is not in inventory."
 
     def deposit_loot():
-        if terminal.network_mode and net_server is None:
+        if terminal.network_mode:
             if net_client:
                 net_client.send_deposit()
             return "Deposit request sent to Archive."
@@ -286,7 +351,7 @@ def main():
         return f"Deposited loot for {deposited} bytes."
 
     def handle_slot_hover(slot_info, get_current=False):
-        nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors, items, floor_number, objective, shared_bytes
+        nonlocal active_seed, dungeon, player_x, player_y, player_color, enemies, doors, items, floor_number, objective, shared_bytes, total_terminals, completed_terminals
         if get_current:
             return active_seed, (player_x, player_y)
 
@@ -300,6 +365,7 @@ def main():
             if active_seed == SHOP_SEED:
                 dungeon, doors, items = build_shop_dungeon()
                 objective = None
+                total_terminals, completed_terminals = 0, 0
             else:
                 load_floor(floor_number, active_seed)
                 objective = make_floor_objective(floor_number, items)
@@ -310,15 +376,11 @@ def main():
             player_y = char_data.get("player_y", default_pos[1])
             player_color = tuple(map(int, char_data["color"].split()))
         else:
-            if terminal.pending_mode == "host":
-                active_seed = LOBBY_SEED
-                dungeon, doors, items = build_lobby_dungeon()
-                objective = None
-            else:
-                active_seed = SHOP_SEED
-                dungeon, doors, items = build_shop_dungeon()
-                objective = None
-            floor_number = 0 if active_seed == SHOP_SEED else 1
+            active_seed = SHOP_SEED
+            dungeon, doors, items = build_shop_dungeon()
+            objective = None
+            total_terminals, completed_terminals = 0, 0
+            floor_number = 0
             shared_bytes = 100
             preview_floors = [pos for pos, c in dungeon.items() if c in (FLOOR, LADDER)]
             player_x, player_y = preview_floors[0] if preview_floors else (0, 0)
@@ -417,7 +479,7 @@ def main():
 
     def purchase_shop_item(item_id):
         nonlocal shared_bytes
-        if terminal.network_mode and net_server is None:
+        if terminal.network_mode:
             if net_client:
                 net_client.send_purchase(item_id)
             return "Purchase request sent to Archive."
@@ -446,16 +508,16 @@ def main():
         save_json(character, slot_path(character["slot"]))
         return f"Purchased {ITEM_NAMES[item_id]}."
 
-    def complete_objective(action_index=0):
-        nonlocal objective, active_objective_pos
+    def complete_objective(action_index=0, from_server=False):
+        nonlocal objective, active_objective_pos, completed_terminals
+        if terminal.network_mode and not from_server:
+            if net_client:
+                net_client.send_objective_complete()
+            return ""
         if not objective:
             return "No active objective."
         if objective.get("completed"):
             return "Objective already complete."
-        if terminal.network_mode and net_server is None:
-            if net_client:
-                net_client.send_objective_complete()
-            return "Puzzle solved; upload request sent to host."
         if (
             objective["type"] == "long"
             and objective["progress"] < objective["required"]
@@ -479,6 +541,8 @@ def main():
         if active_objective_pos is not None:
             item = items.get(active_objective_pos)
             if item and item.get("item_id") in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                if not item.get("objective_completed"):
+                    completed_terminals += 1
                 item["objective_completed"] = True
             active_objective_pos = None
         if terminal.active_character:
@@ -498,6 +562,7 @@ def main():
             active_seed = SHOP_SEED
             dungeon, doors, items = build_shop_dungeon()
             objective = None
+            total_terminals, completed_terminals = 0, 0
         else:
             active_seed = seed_rng.randint(1, 999999)
             load_floor(floor_number, active_seed, get_player_count())
@@ -539,10 +604,7 @@ def main():
                     players[cid]["x"] = spawn_x
                     players[cid]["y"] = spawn_y
         narrative_for_floor(floor_number, objective)
-        if not objective:
-            terminal.add_system_event(
-                f"Shop floor {floor_number}: resupply before descent."
-            )
+        ladder_open = objectives_complete()
         if net_server:
             net_server.seed = active_seed
             net_server.set_world_state(
@@ -550,6 +612,7 @@ def main():
                 shared_bytes=shared_bytes,
                 objective=objective,
                 player_count=get_player_count(),
+                ladder_open=objectives_complete(),
             )
         sync_world_ui()
 
@@ -749,7 +812,6 @@ def main():
             for event in msg.get("events", []):
                 if event not in seen_events:
                     seen_events.add(event)
-                    terminal.add_system_event(event)
             sync_world_ui()
 
         elif mtype == "disconnected":
@@ -902,20 +964,11 @@ def main():
                 if pos in items:
                     item_id = items[pos]["item_id"]
                     if item_id == SHOP_TERMINAL:
-                        if terminal.network_mode and terminal.active_character:
-                            terminal.open_shop(
-                                terminal.active_character,
-                                shared_bytes if terminal.network_mode else None,
-                                on_deposit=deposit_loot,
-                            )
-                        elif terminal.network_mode:
-                            net_client.send_interact(*pos)
-                        else:
-                            terminal.open_shop(
-                                terminal.active_character,
-                                shared_bytes if terminal.network_mode else None,
-                                on_deposit=deposit_loot,
-                            )
+                        terminal.open_shop(
+                            terminal.active_character,
+                            shared_bytes if terminal.network_mode else None,
+                            on_deposit=deposit_loot,
+                        )
                     elif item_id == DATA_SCRAP and terminal.network_mode:
                         net_client.send_pickup(*pos)
                     elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL) and not items[
@@ -973,6 +1026,18 @@ def main():
                                 )
                             terminal.add_system_event(
                                 f"Recovered {item.get('name', 'data scrap')} ({value} bytes)."
+                            )
+                        elif item_id in (OBJECTIVE_TERMINAL, ROAMING_SIGNAL):
+                            snippet = None
+                            if seed_rng.random() < LORE_REWARD_CHANCE:
+                                snippet = next_lore_snippet(
+                                    terminal.active_character,
+                                    item.get("objective_game", ""),
+                                )
+                            if snippet and terminal.active_character:
+                                add_notepad_entry(terminal.active_character, snippet)
+                            terminal.add_system_event(
+                                "Terminal decommissioned; fragment archived to Data."
                             )
                         else:
                             terminal.active_character["items"].append(item_id)
@@ -1128,7 +1193,7 @@ def main():
                     objective = make_floor_objective(
                         floor_number, items, active_objective_pos
                     )
-                complete_objective()
+                complete_objective(from_server=True)
             for cid, ix, iy in net_server.consume_pending_interacts():
                 player_state = net_server.get_players_snapshot().get(cid)
                 if not player_state:
@@ -1261,7 +1326,7 @@ def main():
                     and ladder
                     and abs(pdata["x"] - ladder[0]) + abs(pdata["y"] - ladder[1]) <= 1
                 ):
-                    if objectives_complete():
+                    if active_seed == SHOP_SEED or objectives_complete():
                         advance_floor()
                         descended = True
                     else:
@@ -1307,28 +1372,6 @@ def main():
                     )
         elif not terminal.network_mode:
             advance_door_animations(doors, pygame.time.get_ticks())
-
-            now_ms = pygame.time.get_ticks()
-            for door in doors.values():
-                if door.get("anim_until") and now_ms >= door["anim_until"]:
-                    if door["state"] == "opening":
-                        door["state"] = "open"
-                        door["anim_until"] = None
-                    elif door["state"] == "closing":
-                        door["state"] = "closed"
-                        door["anim_until"] = None
-
-        # Offline games need the same animation completion handling as the
-        # host. Otherwise doors remain permanently in opening/closing state.
-        if net_server is None:
-            now_ms = pygame.time.get_ticks()
-            for door in doors.values():
-                if door.get("anim_until") and now_ms >= door["anim_until"]:
-                    if door["state"] == "opening":
-                        door["state"] = "open"
-                    elif door["state"] == "closing":
-                        door["state"] = "closed"
-                    door["anim_until"] = None
 
         def get_local_ip():
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

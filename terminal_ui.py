@@ -74,6 +74,7 @@ class TerminalUI:
         self.on_mp_color_confirm = on_mp_color_confirm
         self.on_multiplayer_quit = on_multiplayer_quit
         self.transient_message = None
+        self.ladder_open = False
 
         self.state = "START"
         self.selected_index = 0
@@ -350,11 +351,14 @@ class TerminalUI:
         self.return_to_playing()
         self.set_transient(f"Connected as {name}!", (80, 255, 80), duration_ms=2000)
 
-    def set_world_state(self, floor_number, objective=None, shared_bytes=None):
+    def set_world_state(
+        self, floor_number, objective=None, shared_bytes=None, ladder_open=None
+    ):
         """Update the small, render-only slice of authoritative world state."""
         self.floor_number = floor_number
         self.objective = objective
         self.shared_bytes = shared_bytes
+        self.ladder_open = ladder_open
 
     def add_system_event(self, text, lore=None):
         """Show a narrative event and optionally persist it on the active save."""
@@ -378,6 +382,7 @@ class TerminalUI:
         self._start_objective_game(objective)
 
     def _start_objective_game(self, objective):
+        self._objective_callback_called = False
         game = objective.get("game")
         if not game:
             raise ValueError("Objective is missing its game name")
@@ -397,8 +402,8 @@ class TerminalUI:
             # Keep both signals on the same moving time base.  Independent
             # phases make a correctly tuned wave look out of sync.
             shared_phase = rng.random() * math.tau
-            target_amplitude = 0.15 + rng.random() * 0.8
-            target_frequency = 1.25 + rng.random() * 4.5
+            target_amplitude = 0.15 + rng.random() * 0.85
+            target_frequency = 1.25 + rng.random() * 10
             self.objective_game = {
                 "kind": "sine",
                 "amplitude": 0.1 + rng.random() * 0.9,
@@ -475,7 +480,7 @@ class TerminalUI:
             return
         if game and game["kind"] == "sine" and key in (pygame.K_h, pygame.K_F1):
             self.set_transient(
-                "SINE TUNER: arrows adjust amplitude/frequency by 0.025; match within 1%.",
+                "SINE TUNER: arrows adjust amplitude/frequency by 0.01; match within 2%.",
                 (120, 220, 255),
                 duration_ms=2200,
             )
@@ -501,13 +506,13 @@ class TerminalUI:
                 )
         elif kind == "sine":
             if key == pygame.K_RIGHT:
-                game["frequency"] = max(1.0, game["frequency"] - 0.025)
+                game["frequency"] = max(1.0, game["frequency"] - 0.01)
             elif key == pygame.K_LEFT:
-                game["frequency"] = min(6.0, game["frequency"] + 0.025)
+                game["frequency"] = min(11.25, game["frequency"] + 0.01)
             elif key == pygame.K_UP:
-                game["amplitude"] = min(1.0, game["amplitude"] + 0.025)
+                game["amplitude"] = min(1.0, game["amplitude"] + 0.01)
             elif key == pygame.K_DOWN:
-                game["amplitude"] = max(0.1, game["amplitude"] - 0.025)
+                game["amplitude"] = max(0.1, game["amplitude"] - 0.01)
             amplitude_error = (
                 abs(game["amplitude"] - game["target_amplitude"])
                 / game["target_amplitude"]
@@ -516,7 +521,7 @@ class TerminalUI:
                 abs(game["frequency"] - game["target_frequency"])
                 / game["target_frequency"]
             )
-            if amplitude_error <= 0.01 and frequency_error <= 0.01:
+            if amplitude_error <= 0.02 and frequency_error <= 0.02:
                 self._finish_objective_game()
         elif kind == "numbers":
             if key == pygame.K_LEFT:
@@ -618,7 +623,7 @@ class TerminalUI:
                     if pressed[pygame.K_RIGHT]:
                         game["frequency"] = max(1.0, game["frequency"] - amount)
                     if pressed[pygame.K_LEFT]:
-                        game["frequency"] = min(6.0, game["frequency"] + amount)
+                        game["frequency"] = min(11.25, game["frequency"] + amount)
                     if pressed[pygame.K_UP]:
                         game["amplitude"] = min(1.0, game["amplitude"] + amount)
                     if pressed[pygame.K_DOWN]:
@@ -1207,18 +1212,17 @@ class TerminalUI:
                 surface.blit(bytes_lbl, (rect.x + 20, y))
                 y += line_height
 
-        if objective and self.state in (
+        if self.ladder_open is not None and self.state in (
             "PLAYING",
             "INVENTORY",
             "MAP",
             "TERMINAL_GAME",
             "NOTEPAD",
         ):
-            ladder_open = objective.get("completed", False)
             obj_lbl = self.font.render(
-                f"LADDER: {'OPEN' if ladder_open else 'CLOSED'}",
+                f"LADDER: {'OPEN' if self.ladder_open else 'CLOSED'}",
                 True,
-                (120, 255, 160) if ladder_open else (255, 220, 120),
+                (120, 255, 160) if self.ladder_open else (255, 220, 120),
             )
             surface.blit(obj_lbl, (rect.x + 20, y))
             y += line_height
@@ -1820,88 +1824,3 @@ class TerminalUI:
                 rx = x + (dx + radius) * cell
                 ry = y + (dy + radius) * cell
                 pygame.draw.rect(surface, color, (rx, ry, cell - 1, cell - 1))
-
-
-if __name__ == "__main__":
-    # Lightweight objective sandbox: run this file directly to test the UI
-    # without starting the full game.  F1-F6 select a puzzle; T starts the
-    # roaming hotspot objective; Escape exits the current puzzle/menu.
-    pygame.init()
-    pygame.display.set_caption("Terminal UI — Objective Test")
-    screen = pygame.display.set_mode((1100, 700))
-    font = pygame.font.SysFont("consolas", 20)
-    bold_font = pygame.font.SysFont("consolas", 20, bold=True)
-    clock = pygame.time.Clock()
-
-    objectives = [
-        {"id": "test-arrows", "name": "Arrow Sequence", "game": "Arrow Sequence"},
-        {"id": "test-sine", "name": "Sine Wave Tuner", "game": "Sine Wave Tuner"},
-        {
-            "id": "test-numbers",
-            "name": "Number Calibration",
-            "game": "Number Calibration",
-        },
-        {
-            "id": "test-simon",
-            "name": "Memory Pattern / Simon",
-            "game": "Memory Pattern / Simon",
-        },
-        {"id": "test-tracker", "name": "Hotspot Tracker", "game": "Hotspot Tracker"},
-    ]
-    completed = []
-
-    def objective_action(index):
-        if ui.objective and ui.objective.get("name") not in completed:
-            completed.append(ui.objective.get("name", "Objective"))
-        ui.add_log(
-            "OBJECTIVE COMPLETE: " + (ui.objective or {}).get("name", "Objective"),
-            (80, 255, 120),
-        )
-        return "Objective complete!"
-
-    ui = TerminalUI(
-        font,
-        bold_font,
-        lambda *args, **kwargs: (0, (0, 0)),
-        on_objective_action=objective_action,
-    )
-    ui.enter_playing_state("Objective test sandbox ready.")
-    ui.set_world_state(1, objectives[0], 100)
-
-    running = True
-    while running:
-        dt = clock.tick(60)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE and not ui.is_modal_game():
-                    running = False
-                elif pygame.K_F1 <= event.key <= pygame.K_F5:
-                    index = event.key - pygame.K_F1
-                    objective = objectives[index]
-                    ui.objective = objective
-                    if index == 5:
-                        ui.start_signal_tracker(objective, (8, 5), (0, 0))
-                    else:
-                        ui.open_objective_terminal(objective)
-                elif event.key == pygame.K_t:
-                    ui.start_signal_tracker(objectives[5], (8, 5), (0, 0))
-                else:
-                    ui.handle_input(event)
-            else:
-                ui.handle_input(event)
-
-        ui.update_objective_game(dt)
-        screen.fill((5, 8, 12))
-        panel = pygame.Rect(40, 30, 1020, 640)
-        ui.render(
-            screen, panel, objective=ui.objective, floor_number=1, shared_bytes=100
-        )
-        hint = font.render(
-            "F1-F6: choose objective   T: tracker   Esc: quit", True, TEXT_DIM
-        )
-        screen.blit(hint, (55, 650))
-        pygame.display.flip()
-
-    pygame.quit()

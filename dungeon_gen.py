@@ -326,7 +326,7 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
                 tiles,
                 *pos,
                 require_wall=False,
-                min_floor_neighbors=TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS,
+                min_wall_neighbors=TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS,
             )
         ]
     if GENERATION_DEBUG:
@@ -366,11 +366,11 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             if existing_item and existing_item.get("item_id") == OBJECTIVE_TERMINAL:
                 continue
             roll = rng.random()
-            if roll < 0.10 and not hotspot_spawned:
+            if roll < 0.0 and not hotspot_spawned:
                 item_id = ROAMING_SIGNAL
                 game = "Hotspot Signal Tracker"
                 hotspot_spawned = True
-            elif roll < 0.60:
+            elif roll < 0.85:
                 item_id = OBJECTIVE_TERMINAL
                 game = rng.choice(terminal_games["fast"])
             else:
@@ -516,7 +516,7 @@ def vision_blocking_dungeon(dungeon, doors):
 # ---------------------------------------------------------------------------
 # region DEBUG / SEED REPLAY
 # ---------------------------------------------------------------------------
-GENERATION_DEBUG = True
+GENERATION_DEBUG = False
 seed_rng = random.Random()
 
 

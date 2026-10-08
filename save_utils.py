@@ -16,6 +16,7 @@ def normalize_character(character: dict) -> dict:
     character.setdefault("loot", [])
     character.setdefault("equipped_light", None)
     character.setdefault("objective", None)
+    character.setdefault("lore_progress", {})
     return character
 
 
