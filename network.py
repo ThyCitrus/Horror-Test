@@ -1,5 +1,5 @@
 """
-network.py — authoritative host / connecting client, TCP, newline-delimited JSON.
+network.py — TCP game-state networking and authenticated UDP voice relay.
 
 GameServer:  runs on the host's machine. Owns connection lifecycle, name/color
              reservation, and per-client input intent + position. Does NOT
@@ -9,17 +9,21 @@ GameServer:  runs on the host's machine. Owns connection lifecycle, name/color
 GameClient:  runs on every machine, including the host (which connects to its
              own GameServer over a real socket — no shortcuts). Sends local
              input, receives broadcasts, hands everything to an inbox queue
-             for main.py to dispatch.
+             for main.py to dispatch. Voice packets use a separate UDP socket.
 """
 
 import json
+import math
 import socket
 import threading
 import queue
+import secrets
 import uuid
 from pathlib import Path
 
 DEFAULT_PORT = 5555
+VOICE_PORT_OFFSET = 1
+VOICE_MAX_DISTANCE = 18
 BROADCAST_HZ = 10
 CLIENT_ID_PATH = Path(__file__).resolve().parent / "client_id.txt"
 _UNSET = object()
@@ -75,14 +79,41 @@ class GameServer:
         shared_bytes: int = 0,
         objective=None,
         player_count: int = 1,
+        saved_players=None,
     ):
         self.seed = seed
         self.port = port
+        self.voice_port = port + VOICE_PORT_OFFSET
         self.players = {}  # client_id -> player record dict
+        for client_id, saved in (saved_players or {}).items():
+            self.players[client_id] = {
+                "name": saved["name"],
+                "color": saved["color"],
+                "x": saved.get("x", 0),
+                "y": saved.get("y", 0),
+                "facing": saved.get("facing", "v"),
+                "alive": saved.get("alive", True),
+                "connected": False,
+                "dx": 0,
+                "dy": 0,
+                "sprinting": False,
+                "look_angle": saved.get("look_angle", 0.0),
+                "socket": None,
+                "voice_token": None,
+                "items": list(saved.get("items", [])),
+                "loot": list(saved.get("loot", [])),
+                "equipped_light": saved.get("equipped_light"),
+                "light_on": bool(saved.get("light_on", False)),
+                "_persisted": True,
+            }
         self.spawn_fn = spawn_fn or (lambda: (0, 0))
         self._lock = threading.RLock()
         self._sock = None
+        self._voice_sock = None
+        self.voice_error = None
         self._running = False
+        self._voice_addresses = {}
+        self._voice_tokens = {}
         self.pending_interacts = []
         self.pending_objective_completions = []
         self.doors_snapshot = {}
@@ -97,20 +128,37 @@ class GameServer:
         self.objective = objective
         self.player_count = player_count
         self.events = []
+        self.ladder_open = False
+        self.layout_crc = None
+        self.agnate = None
 
     def start(self):
+        if not 1 <= self.port <= 65534:
+            raise ValueError("The game port must be between 1 and 65534.")
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("0.0.0.0", self.port))
         self._sock.listen()
+        try:
+            self._voice_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._voice_sock.bind(("0.0.0.0", self.voice_port))
+            self._voice_sock.settimeout(0.2)
+        except OSError as exc:
+            if self._voice_sock:
+                self._voice_sock.close()
+                self._voice_sock = None
+            self.voice_error = str(exc)
         self._running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
         threading.Thread(target=self._broadcast_loop, daemon=True).start()
+        threading.Thread(target=self._voice_loop, daemon=True).start()
 
     def stop(self):
         self._running = False
         if self._sock:
             self._sock.close()
+        if self._voice_sock:
+            self._voice_sock.close()
 
     # --- accept / per-client handling ---
 
@@ -146,6 +194,9 @@ class GameServer:
                             if client_id in self.players:
                                 self.players[client_id]["dx"] = msg.get("dx", 0)
                                 self.players[client_id]["dy"] = msg.get("dy", 0)
+                                self.players[client_id]["sprinting"] = bool(
+                                    msg.get("sprinting", False)
+                                )
                     elif mtype == "turn" and client_id:
                         with self._lock:
                             if client_id in self.players:
@@ -183,12 +234,22 @@ class GameServer:
                     elif mtype == "deposit" and client_id:
                         with self._lock:
                             self.pending_deposits.append(client_id)
-                    elif mtype == "toggle_light" and client_id:
+                    elif mtype == "equip" and client_id:
                         with self._lock:
-                            if client_id in self.players:
-                                self.players[client_id]["light_on"] = not self.players[
-                                    client_id
-                                ]["light_on"]
+                            p = self.players.get(client_id)
+                            item_id = msg.get("item_id")
+                            if (
+                                p
+                                and item_id in ("Flashlight", "Lantern")
+                                and item_id in p["items"]
+                            ):
+                                p["equipped_light"] = item_id
+                                p["light_on"] = False
+                    elif mtype == "set_light" and client_id:
+                        with self._lock:
+                            p = self.players.get(client_id)
+                            if p and p.get("equipped_light"):
+                                p["light_on"] = bool(msg.get("on"))
 
         except (ConnectionError, OSError):
             pass
@@ -198,14 +259,19 @@ class GameServer:
                     if client_id in self.players:
                         self.players[client_id]["connected"] = False
                         self.players[client_id]["socket"] = None
+                    self._voice_addresses.pop(client_id, None)
 
     def _handle_hello(self, client_id, stream):
         with self._lock:
+            token = secrets.token_hex(16)
+            self._voice_tokens[client_id] = token
+            self._voice_addresses.pop(client_id, None)
             existing = self.players.get(client_id)
             if existing and not existing["connected"]:
                 # reconnect: same identity, no re-pick needed
                 existing["connected"] = True
                 existing["socket"] = stream
+                existing["voice_token"] = token
                 stream.send(
                     {
                         "type": "roster",
@@ -216,6 +282,10 @@ class GameServer:
                         "shared_bytes": self.shared_bytes,
                         "objective": self.objective,
                         "player_count": self.player_count,
+                        "voice_token": token,
+                        "voice_port": self.voice_port,
+                        "voice_available": self._voice_sock is not None,
+                        "voice_error": self.voice_error,
                     }
                 )
                 return
@@ -232,6 +302,10 @@ class GameServer:
                     "shared_bytes": self.shared_bytes,
                     "objective": self.objective,
                     "player_count": self.player_count,
+                    "voice_token": token,
+                    "voice_port": self.voice_port,
+                    "voice_available": self._voice_sock is not None,
+                    "voice_error": self.voice_error,
                 }
             )
 
@@ -274,12 +348,15 @@ class GameServer:
                 "connected": True,
                 "dx": 0,
                 "dy": 0,
+                "sprinting": False,
                 "look_angle": 0.0,
                 "socket": stream,
+                "voice_token": self._voice_tokens.get(client_id),
                 "items": [],
                 "loot": [],
                 "equipped_light": None,
                 "light_on": False,
+                "_persisted": False,
             }
             stream.send(
                 {
@@ -290,6 +367,7 @@ class GameServer:
                     "shared_bytes": self.shared_bytes,
                     "floor": self.floor_number,
                     "objective": self.objective,
+                    "voice_token": self._voice_tokens.get(client_id),
                 }
             )
 
@@ -298,7 +376,7 @@ class GameServer:
         for cid, p in self.players.items():
             if cid == exclude:
                 continue
-            if p["connected"]:
+            if p["connected"] or p.get("_persisted", False):
                 names.append(p["name"])
                 colors.append(p["color"])
         return names, colors
@@ -308,7 +386,11 @@ class GameServer:
     def get_players_snapshot(self) -> dict:
         with self._lock:
             return {
-                cid: {k: v for k, v in p.items() if k != "socket"}
+                cid: {
+                    k: v
+                    for k, v in p.items()
+                    if k not in ("socket", "_persisted", "voice_token")
+                }
                 for cid, p in self.players.items()
             }
 
@@ -319,9 +401,9 @@ class GameServer:
             p = self.players.get(client_id)
             if not p:
                 return 0, 0
-            dx, dy = p["dx"], p["dy"]
-            p["dx"], p["dy"] = 0, 0
-            return dx, dy
+            dx, dy, sprinting = p["dx"], p["dy"], p.get("sprinting", False)
+            p["dx"], p["dy"], p["sprinting"] = 0, 0, False
+            return dx, dy, sprinting
 
     def update_player_position(self, client_id, x, y, facing):
         with self._lock:
@@ -387,6 +469,12 @@ class GameServer:
             if player and player.get("socket"):
                 player["socket"].send({"type": "purchase_result", "message": message})
 
+    def send_lore(self, client_id, text):
+        with self._lock:
+            player = self.players.get(client_id)
+            if player and player.get("socket"):
+                player["socket"].send({"type": "lore", "text": text})
+
     def send_objective_start(
         self, client_id, objective, target=None, objective_pos=None
     ):
@@ -406,6 +494,18 @@ class GameServer:
         with self._lock:
             if client_id in self.players:
                 self.players[client_id]["items"].append(item_id)
+
+    def set_player_inventory(self, client_id, items, loot, equipped_light):
+        with self._lock:
+            player = self.players.get(client_id)
+            if player:
+                player["items"] = list(items)
+                player["loot"] = list(loot)
+                player["equipped_light"] = (
+                    equipped_light if equipped_light in player["items"] else None
+                )
+                if player["equipped_light"] is None:
+                    player["light_on"] = False
 
     def add_loot_to_player(self, client_id, loot):
         with self._lock:
@@ -448,6 +548,19 @@ class GameServer:
             if ladder_open is not _UNSET:
                 self.ladder_open = ladder_open
 
+    def set_floor(self, seed, floor_number, player_count, layout_crc=None):
+        """Seed, floor, and player count change together, atomically."""
+        with self._lock:
+            self.seed = seed
+            self.floor_number = floor_number
+            self.player_count = max(1, int(player_count))
+            self.layout_crc = layout_crc
+            self.ladder_open = False
+
+    def set_agnate(self, data):
+        with self._lock:
+            self.agnate = data
+
     def add_shared_bytes(self, amount):
         with self._lock:
             self.shared_bytes = max(0, self.shared_bytes + int(amount))
@@ -458,6 +571,74 @@ class GameServer:
             if event and event not in self.events:
                 self.events.append(event)
                 self.events = self.events[-20:]
+
+    def _voice_loop(self):
+        voice_sock = self._voice_sock
+        while self._running and voice_sock:
+            try:
+                packet, address = voice_sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if len(packet) == 33 and packet[:1] == b"H":
+                try:
+                    client_id = str(uuid.UUID(bytes=packet[1:17]))
+                except ValueError:
+                    continue
+                supplied_token = packet[17:].hex()
+                with self._lock:
+                    player = self.players.get(client_id)
+                    expected_token = (
+                        player.get("voice_token") if player else None
+                    )
+                    if (
+                        player
+                        and player.get("connected")
+                        and expected_token
+                        and secrets.compare_digest(supplied_token, expected_token)
+                    ):
+                        self._voice_addresses[client_id] = address
+                        try:
+                            voice_sock.sendto(b"A" + uuid.UUID(client_id).bytes, address)
+                        except (OSError, ValueError):
+                            pass
+                continue
+            if len(packet) != 1 + 16 + 160 or packet[:1] != b"V":
+                continue
+            try:
+                sender_id = str(uuid.UUID(bytes=packet[1:17]))
+            except ValueError:
+                continue
+            with self._lock:
+                sender = self.players.get(sender_id)
+                if (
+                    not sender
+                    or not sender.get("connected")
+                    or not sender.get("alive", True)
+                    or self._voice_addresses.get(sender_id) != address
+                ):
+                    continue
+                recipients = []
+                for recipient_id, recipient in self.players.items():
+                    if (
+                        recipient_id == sender_id
+                        or not recipient.get("connected")
+                        or not recipient.get("alive", True)
+                        or recipient_id not in self._voice_addresses
+                    ):
+                        continue
+                    distance = math.hypot(
+                        sender.get("x", 0) - recipient.get("x", 0),
+                        sender.get("y", 0) - recipient.get("y", 0),
+                    )
+                    if distance <= VOICE_MAX_DISTANCE:
+                        recipients.append(self._voice_addresses[recipient_id])
+            for recipient_address in recipients:
+                try:
+                    voice_sock.sendto(packet, recipient_address)
+                except OSError:
+                    pass
 
     # --- broadcast thread ---
 
@@ -471,7 +652,11 @@ class GameServer:
                     "type": "state",
                     "seed": self.seed,
                     "players": {
-                        cid: {k: v for k, v in p.items() if k != "socket"}
+                        cid: {
+                            k: v
+                            for k, v in p.items()
+                            if k not in ("socket", "_persisted", "voice_token")
+                        }
                         for cid, p in self.players.items()
                     },
                     "doors": self.doors_snapshot,
@@ -480,6 +665,9 @@ class GameServer:
                     "shared_bytes": self.shared_bytes,
                     "objective": self.objective,
                     "player_count": self.player_count,
+                    "ladder_open": self.ladder_open,
+                    "layout_crc": self.layout_crc,
+                    "agnate": self.agnate,
                     "events": self.events[-10:],
                 }
                 dead_sockets = []
@@ -523,8 +711,10 @@ class GameClient:
     def send_join(self, name: str, color: str):
         self._stream.send({"type": "join", "name": name, "color": color})
 
-    def send_input(self, dx: int, dy: int):
-        self._stream.send({"type": "input", "dx": dx, "dy": dy})
+    def send_input(self, dx: int, dy: int, sprinting=False):
+        self._stream.send(
+            {"type": "input", "dx": dx, "dy": dy, "sprinting": bool(sprinting)}
+        )
 
     def send_turn(self, facing, look_angle=0.0):
         self._stream.send({"type": "turn", "facing": facing, "look_angle": look_angle})
@@ -556,8 +746,11 @@ class GameClient:
     def send_drop(self, index):
         self._stream.send({"type": "drop", "index": index})
 
-    def send_toggle_light(self):
-        self._stream.send({"type": "toggle_light"})
+    def send_set_light(self, on):
+        self._stream.send({"type": "set_light", "on": bool(on)})
+
+    def send_equip(self, item_id):
+        self._stream.send({"type": "equip", "item_id": item_id})
 
     def send_descend(self):
         self._stream.send({"type": "descend"})

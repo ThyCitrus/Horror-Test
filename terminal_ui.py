@@ -1,7 +1,7 @@
 import sys
 import math
-import array
 import random
+import array
 import pygame
 
 from save_utils import (
@@ -19,6 +19,7 @@ TEXT_WHITE = (230, 230, 230)
 TEXT_DIM = (120, 120, 120)
 PANEL_BG = (15, 15, 15)
 PANEL_DIVIDER = (80, 80, 80)
+BYTES_GOLD_CAP = 1_000_000_000
 
 ENABLE_MOUSE_NAVIGATION = False
 
@@ -89,6 +90,7 @@ class TerminalUI:
         self.options = []
         self.option_colors = []
         self._hover_sound = None
+        self._objective_sound_cache = {}
 
         self.creation_slot = None
         self.creation_name = ""
@@ -110,6 +112,8 @@ class TerminalUI:
         self.mp_color_grid_index = 0
         self.network_mode = False
         self.mp_hud_player = None  # {"name", "color", "alive"} for guests only
+        self.mp_notepad = []
+        self.owned_items = []
         self.hosting_info = None
         self.inventory_index = 0
         self.inventory_section = None
@@ -155,24 +159,55 @@ class TerminalUI:
                 self.on_slot_hover_callback(slots[self.selected_index])
 
     def _play_hover_sound(self):
-        if self._hover_sound is None:
-            mixer_settings = pygame.mixer.get_init()
-            if mixer_settings:
-                frequency, sample_format, channels = mixer_settings
-                if sample_format == -16:
-                    sample_count = max(1, int(frequency * 0.045))
-                    samples = array.array("h")
-                    for i in range(sample_count):
-                        envelope = 1.0 - (i / sample_count)
-                        value = int(
-                            5000
-                            * envelope
-                            * math.sin(2 * math.pi * 440 * i / frequency)
-                        )
-                        samples.extend([value] * channels)
-                    self._hover_sound = pygame.mixer.Sound(buffer=samples.tobytes())
+        if self._hover_sound is None and pygame.mixer.get_init():
+            self._hover_sound = pygame.mixer.Sound("sfx/Hover_Sound.wav")
+            self._hover_sound.set_volume(0.35)
         if self._hover_sound is not None:
             self._hover_sound.play()
+
+    def _play_objective_tone(
+        self, frequency, volume=0.14, duration=0.07, second_frequency=None
+    ):
+        mixer_format = pygame.mixer.get_init()
+        if not mixer_format or mixer_format[1] != -16:
+            return
+        sample_rate, _, channels = mixer_format
+        frequencies = (frequency, second_frequency)
+        cache_key = (frequencies, volume, duration, sample_rate, channels)
+        sound = self._objective_sound_cache.get(cache_key)
+        if sound is None:
+            sample_count = max(1, int(sample_rate * duration))
+            samples = array.array("h")
+            for index in range(sample_count):
+                time_s = index / sample_rate
+                envelope = min(1.0, index / 80, (sample_count - index) / 160)
+                values = [
+                    math.sin(math.tau * tone * time_s)
+                    for tone in frequencies
+                    if tone is not None
+                ]
+                value = sum(values) / max(1, len(values))
+                sample = int(32767 * volume * envelope * value)
+                samples.extend([sample] * channels)
+            sound = pygame.mixer.Sound(buffer=samples.tobytes())
+            self._objective_sound_cache[cache_key] = sound
+            if len(self._objective_sound_cache) > 64:
+                oldest_key = next(iter(self._objective_sound_cache))
+                del self._objective_sound_cache[oldest_key]
+        sound.play()
+
+    def _play_number_click(self):
+        self._play_objective_tone(1750, volume=0.12, duration=0.025)
+
+    def _play_sine_tuner_tone(self, game):
+        current_pitch = 180 + game["frequency"] * 38
+        target_pitch = 180 + game["target_frequency"] * 38
+        self._play_objective_tone(
+            current_pitch,
+            volume=0.035,
+            duration=0.12,
+            second_frequency=target_pitch,
+        )
 
     # --- menu navigation ---
 
@@ -495,6 +530,14 @@ class TerminalUI:
             return
         kind = game["kind"]
         if kind == "arrows":
+            self._play_objective_tone(
+                {
+                    pygame.K_UP: 660,
+                    pygame.K_RIGHT: 550,
+                    pygame.K_DOWN: 440,
+                    pygame.K_LEFT: 330,
+                }[key]
+            )
             if key == game["sequence"][game["index"]]:
                 game["index"] += 1
                 if game["index"] >= len(game["sequence"]):
@@ -513,6 +556,7 @@ class TerminalUI:
                 game["amplitude"] = min(1.0, game["amplitude"] + 0.01)
             elif key == pygame.K_DOWN:
                 game["amplitude"] = max(0.1, game["amplitude"] - 0.01)
+            self._play_sine_tuner_tone(game)
             amplitude_error = (
                 abs(game["amplitude"] - game["target_amplitude"])
                 / game["target_amplitude"]
@@ -524,6 +568,7 @@ class TerminalUI:
             if amplitude_error <= 0.02 and frequency_error <= 0.02:
                 self._finish_objective_game()
         elif kind == "numbers":
+            self._play_number_click()
             if key == pygame.K_LEFT:
                 game["selected"] = (game["selected"] - 1) % 5
             elif key == pygame.K_RIGHT:
@@ -562,11 +607,13 @@ class TerminalUI:
                 }[key]
                 x, y = game.get("cursor", [1, 1])
                 game["cursor"] = [max(0, min(2, x + dx)), max(0, min(2, y + dy))]
+                self._play_hover_sound()
                 return
             if (
                 key == pygame.K_RETURN
                 and tuple(game.get("cursor", [1, 1])) == game["sequence"][game["index"]]
             ):
+                self._play_hover_sound()
                 game["feedback"] = "right"
                 game["feedback_until"] = pygame.time.get_ticks() + 180
                 game["index"] += 1
@@ -581,6 +628,7 @@ class TerminalUI:
                         game["complete_until"] = pygame.time.get_ticks() + 450
             else:
                 if key == pygame.K_RETURN:
+                    self._play_hover_sound()
                     game["feedback"] = "wrong"
                     game["feedback_until"] = pygame.time.get_ticks() + 300
                     game["sequence"] = [
@@ -620,14 +668,21 @@ class TerminalUI:
                     steps = game["held_elapsed"] // 35
                     game["held_elapsed"] %= 35
                     amount = 0.025 * steps
+                    tuning = False
                     if pressed[pygame.K_RIGHT]:
                         game["frequency"] = max(1.0, game["frequency"] - amount)
+                        tuning = True
                     if pressed[pygame.K_LEFT]:
                         game["frequency"] = min(11.25, game["frequency"] + amount)
+                        tuning = True
                     if pressed[pygame.K_UP]:
                         game["amplitude"] = min(1.0, game["amplitude"] + amount)
+                        tuning = True
                     if pressed[pygame.K_DOWN]:
                         game["amplitude"] = max(0.1, game["amplitude"] - amount)
+                        tuning = True
+                    if tuning:
+                        self._play_sine_tuner_tone(game)
                 game["phase"] = (game["phase"] + dt_ms * 0.002) % math.tau
                 # The target and adjustable signal must remain aligned while
                 # their amplitude/frequency values are being compared.
@@ -879,6 +934,7 @@ class TerminalUI:
                     else:
                         self.inventory_section = None
                         self.inventory_index = 0
+                    self._play_hover_sound()
                     return
                 if self.inventory_section is None:
                     if event.key == pygame.K_UP:
@@ -890,6 +946,9 @@ class TerminalUI:
                             self.inventory_index
                         ]
                         self.inventory_index = 0
+                    else:
+                        return
+                    self._play_hover_sound()
                     return
                 source = (
                     self.current_inventory_items
@@ -900,11 +959,14 @@ class TerminalUI:
                 if count > 0:
                     if event.key == pygame.K_UP:
                         self.inventory_index = (self.inventory_index - 1) % count
+                        self._play_hover_sound()
                     elif event.key == pygame.K_DOWN:
                         self.inventory_index = (self.inventory_index + 1) % count
+                        self._play_hover_sound()
                     elif event.key == pygame.K_RIGHT:
                         self.inventory_section = None
                         self.inventory_index = 0
+                        self._play_hover_sound()
                     elif event.key == pygame.K_BACKSPACE:
                         if self.inventory_section == "Tools" and self.on_drop_item:
                             self.on_drop_item(self.inventory_index)
@@ -934,8 +996,10 @@ class TerminalUI:
             elif event.type == pygame.KEYDOWN and self.options:
                 if event.key == pygame.K_UP:
                     self.selected_index = (self.selected_index - 1) % len(self.options)
+                    self._play_hover_sound()
                 elif event.key == pygame.K_DOWN:
                     self.selected_index = (self.selected_index + 1) % len(self.options)
+                    self._play_hover_sound()
             return
 
         if self.state == "SHOP":
@@ -946,8 +1010,10 @@ class TerminalUI:
                     self.return_to_playing()
                 elif event.key == pygame.K_UP and self.options:
                     self.selected_index = (self.selected_index - 1) % len(self.options)
+                    self._play_hover_sound()
                 elif event.key == pygame.K_DOWN and self.options:
                     self.selected_index = (self.selected_index + 1) % len(self.options)
+                    self._play_hover_sound()
             return
 
         if self.state == "NOTEPAD":
@@ -1093,12 +1159,7 @@ class TerminalUI:
                 self.inventory_section = None
                 self.set_options(["Tools", "Scrap", "Data"])
             elif sel == 1:
-                items = (
-                    self.active_character.get("items", [])
-                    if self.active_character
-                    else []
-                )
-                if "Map" in items:
+                if "Map" in self.owned_items:
                     self.state = "MAP"
                     self.set_options([])
                 else:
@@ -1121,7 +1182,10 @@ class TerminalUI:
                 message = self.on_shop_purchase(item_ids[sel])
                 color = (80, 255, 80) if "Purchased" in message else (255, 180, 80)
                 self.set_transient(message, color, duration_ms=1800)
-                self.open_shop(self.active_character)
+                self.open_shop(
+                    self.active_character,
+                    self.shared_bytes if self.network_mode else None,
+                )
 
         elif self.state == "TERMINAL_GAME":
             if sel == len(self.options) - 1:
@@ -1166,7 +1230,9 @@ class TerminalUI:
         objective=None,
         floor_number=None,
         shared_bytes=None,
+        stamina=None,
     ):
+        self.owned_items = list(local_items) if local_items is not None else []
         pygame.draw.rect(surface, PANEL_BG, rect)
         pygame.draw.line(surface, PANEL_DIVIDER, (rect.x, 0), (rect.x, rect.height), 2)
 
@@ -1370,7 +1436,11 @@ class TerminalUI:
                         for entry in self.current_inventory_loot
                     ]
                 else:
-                    entries = list((self.active_character or {}).get("notepad", []))
+                    entries = (
+                        list(self.active_character.get("notepad", []))
+                        if self.active_character
+                        else list(self.mp_notepad)
+                    )
                 if not entries:
                     entries = ["(Empty)"]
             for i, item_name in enumerate(entries):
@@ -1418,9 +1488,17 @@ class TerminalUI:
             elif self.mp_hud_player:
                 hud_color = tuple(map(int, self.mp_hud_player["color"].split()))
             self.render_minimap(
-                surface, rect.x + 20, y, dungeon, discovered, player_pos, hud_color
+                surface,
+                rect.x + 20,
+                y,
+                dungeon,
+                discovered,
+                player_pos,
+                hud_color,
+                radius=30,
+                cell=6,
             )
-            y += 21 * 5 + 10
+            y += 61 * 6 + 10
 
         self.option_rects.clear()
         if self.state not in (
@@ -1465,7 +1543,14 @@ class TerminalUI:
 
             name_lbl = self.bold_font.render(c["name"], True, (r, g, b))
             surface.blit(name_lbl, (rect.x + 20, hud_y))
-            self.render_hud_line(surface, rect.x + 20, hud_y + line_height, c)
+            shown_bytes = (
+                self.shared_bytes
+                if self.network_mode and self.shared_bytes is not None
+                else None
+            )
+            self.render_hud_line(
+                surface, rect.x + 20, hud_y + line_height, c, shown_bytes
+            )
 
         elif self.mp_hud_player:
             hud_y = rect.height - 80
@@ -1481,7 +1566,34 @@ class TerminalUI:
             )
             surface.blit(bytes_lbl, (rect.x + 20, hud_y + line_height))
 
-    def render_hud_line(self, surface, x, y, character):
+        if stamina is not None and self.state in ("PLAYING", "INVENTORY", "MAP"):
+            fraction, exhausted = stamina
+            bar_len = 20
+            filled = int(round(max(0.0, min(1.0, fraction)) * bar_len))
+            if exhausted:
+                bar_color = (255, 70, 70)
+            elif fraction < 0.25:
+                bar_color = (255, 165, 50)
+            else:
+                bar_color = (200, 225, 255)
+            bar_y = rect.height - 80 - line_height * 2
+            label = self.font.render("STAM ", True, TEXT_DIM)
+            surface.blit(label, (rect.x + 20, bar_y))
+            bx = rect.x + 20 + label.get_width()
+            if filled > 0:
+                full = self.font.render("█" * filled, True, bar_color)
+                surface.blit(full, (bx, bar_y))
+                bx += full.get_width()
+            if filled < bar_len:
+                empty = self.font.render("█" * (bar_len - filled), True, (45, 45, 45))
+                surface.blit(empty, (bx, bar_y))
+                bx += empty.get_width()
+            if exhausted:
+                surface.blit(
+                    self.font.render(" EXHAUSTED", True, (255, 70, 70)), (bx, bar_y)
+                )
+
+    def render_hud_line(self, surface, x, y, character, currency=None):
         health_percent = character["hp"] / character["max_hp"]
 
         if health_percent > 0.75:
@@ -1495,11 +1607,15 @@ class TerminalUI:
 
         segments = [(f"HP: {character['hp']}/{character['max_hp']}", h_color)]
 
-        currency = character.get("bytes", character.get("gold", 0))
-        drain = currency // 10
+        if currency is None:
+            currency = character.get("bytes", character.get("gold", 0))
+        t = min(
+            1.0,
+            math.log10(max(0, currency) + 1) / math.log10(BYTES_GOLD_CAP + 1),
+        )
         g_r = 255
-        g_g = max(150, 255 - max(0, drain - 255))
-        g_b = max(0, 255 - drain)
+        g_g = int(255 - (255 - 150) * t)
+        g_b = int(255 * (1.0 - t))
         segments.append((f"Bytes: {currency}", (g_r, g_g, g_b)))
 
         segments.append((f"Lv. {character['level']}", (0, 255, 255)))
@@ -1530,7 +1646,7 @@ class TerminalUI:
         )
         light_price = "FREE (first light)" if free_light else "100 bytes"
         if shared_bytes is not None:
-            light_price = "100 bytes (shared)"
+            light_price = "100 bytes (first light free)"
         self.set_options(
             [
                 f"Flashlight — {light_price}",

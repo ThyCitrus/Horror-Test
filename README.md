@@ -17,7 +17,18 @@ A terminal-UI styled horror dungeon crawler built with **Pygame**, featuring pro
 ## Networking & Port Forwarding
 
 * **Current Status**: Multiplayer connection features are currently under active development and may be blocked by Windows Firewall or local router settings.
-* **Workaround**: If hosting or joining across different networks fails, use tunneling services like [playit.gg](https://playit.gg/) or Ngrok to route the default TCP port (`5555`).
+* **Workaround**: If hosting or joining across different networks fails, use a tunneling service that supports both the default TCP game port (`5555`) and UDP voice port (`5556`).
+* **Voice chat**: Optional proximity voice uses push-to-talk over UDP. Allow/forward UDP `5556` as well as TCP `5555` when hosting on the default port. For a custom game port, the voice port is the next port number.
+
+### Optional Voice Chat
+
+Install microphone support with:
+
+```bash
+pip install -r requirements-voice.txt
+```
+
+Hold **V** to talk; double-tap **V** to toggle hands-free transmission on or off. A short radio chirp confirms each transmission state change. Press **M** to mute received voices. Voice is mono, narrow-band, low-bitrate, deliberately degraded radio audio with distortion, static, and brief dropouts. Nearby living players hear it more clearly; distance and walls reduce volume and walls muffle it. Microphone capture starts only while push-to-talk is held or hands-free mode is enabled. Voice chat is unavailable if the optional audio dependency, microphone, or UDP voice port cannot be used; the game itself remains playable.
 
 ---
 
@@ -26,7 +37,7 @@ A terminal-UI styled horror dungeon crawler built with **Pygame**, featuring pro
 * **`main.py`**: Primary entry point. Handles rendering loops, camera viewport tracking, Pygame event processing, and multiplayer message dispatching.
 * **`dungeon_gen.py`**: Core algorithm for procedural dungeon layout generation, line-of-sight checks, FOV computation, and fog brightness calculations.
 * **`terminal_ui.py`**: Manages interactive UI states, save slot navigation, multiplayer setup screens, and HUD/minimap rendering.
-* **`network.py`**: Implements `GameServer` and `GameClient` using TCP sockets with newline-delimited JSON message streams.
+* **`network.py`**: Implements `GameServer` and `GameClient` using TCP JSON streams for game state and a proximity-filtered UDP relay for voice.
 * **`save_utils.py`**: File I/O utilities for loading, writing, listing, and deleting character saves in JSON format.
 * **`enemies.py`**: Defines base enemy types and behavior structures.
 

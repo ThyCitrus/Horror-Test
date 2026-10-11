@@ -32,6 +32,15 @@ TERMINAL_RELAXED_MIN_FLOOR_NEIGHBORS = 7
 ANNEX_ATTACH_ATTEMPTS = 10
 AGNATE_ANNEX_MARKER = "AgnateAnnexSpawn"
 
+
+def layout_checksum(tiles):
+    """Cheap fingerprint of a generated floor, for host/guest desync detection."""
+    import zlib
+
+    payload = ";".join(f"{x},{y},{tile}" for (x, y), tile in sorted(tiles.items()))
+    return zlib.crc32(payload.encode("utf-8"))
+
+
 LOOT_TABLE = (
     ("Calculators / Digital Watches", ((100, 70), (500, 25), (1_000, 5))),
     ("Smart Lightbulb / Thermostat Board", ((1_000, 60), (4_000, 30), (16_000, 10))),
@@ -295,15 +304,12 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
     shop_floors_visited = max(0, (floor_number - 1) // 3)
     items = {}
     terminal_count = max(1, math.ceil(room_count / 10))
-    hotspot_spawned = False
-    terminal_games = {
-        "fast": (
-            "Arrow Sequence",
-            "Number Calibration",
-            "Sine Wave Signal Tuner",
-        ),
-        "long": ("Memory Pattern / Simon",),
-    }
+    terminal_games = (
+        ("Arrow Sequence", 40),
+        ("Sine Wave Signal Tuner", 30),
+        ("Number Calibration", 25),
+        ("Memory Pattern / Simon", 5),
+    )
 
     terminal_pool = [
         pos
@@ -365,17 +371,12 @@ def build_floor_dungeon(floor_number, seed, player_count=1):
             existing_item = items.get(pos)
             if existing_item and existing_item.get("item_id") == OBJECTIVE_TERMINAL:
                 continue
-            roll = rng.random()
-            if roll < 0.0 and not hotspot_spawned:
-                item_id = ROAMING_SIGNAL
-                game = "Hotspot Signal Tracker"
-                hotspot_spawned = True
-            elif roll < 0.85:
-                item_id = OBJECTIVE_TERMINAL
-                game = rng.choice(terminal_games["fast"])
-            else:
-                item_id = OBJECTIVE_TERMINAL
-                game = rng.choice(terminal_games["long"])
+            item_id = OBJECTIVE_TERMINAL
+            game = rng.choices(
+                [name for name, _ in terminal_games],
+                weights=[weight for _, weight in terminal_games],
+                k=1,
+            )[0]
             items[pos] = {
                 "item_id": item_id,
                 "objective_game": game,
